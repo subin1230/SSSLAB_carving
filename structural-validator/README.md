@@ -15,6 +15,23 @@ ZIP 정상 헤더에서도 ENTRY_DATA_CRC는 UNKNOWN입니다. 헤더 검사와 
 
 ## 실제 파일에서 블록 하나 읽기
 
+### 512바이트 블록 실험 자동 실행
+
+```sh
+python3 block_demo.py
+```
+
+완전한 PNG와 ZIP 원본 파일을 생성하고, 512바이트씩 분할하여 위치와 SHA-256을 기록합니다.
+정상 구조, 복사본의 필드 손상, 다음 블록까지 이어지는 구조의 6가지 규칙별 예상 결과를 비교합니다.
+모두 일치하면 PASS 6개가 출력됩니다. 생성물은 `block-demo-output/`에 저장합니다.
+`report.md`는 비교표, `results.json`은 세부 결과, `block-index.csv`는 원본 위치 목록입니다.
+`sample.png`, `sample.zip`, `crossing.zip`은 원본이며 `case-1.bin`~`case-6.bin`은 검사 입력입니다.
+재실행하면 이 전용 폴더의 같은 이름 생성물을 덮어씁니다.
+PNG 경계 걸침은 같은 첫 블록의 IHDR 대신 IDAT를 검사하며, ZIP은 긴 경로명이 있는 정상 ZIP을 사용합니다.
+위치가 알려진 통제 실험이므로 자동 후보 탐색 정확도나 실제 포렌식 매체의 성능을 입증하지 않습니다.
+
+### 원하는 파일 검사
+
 ```sh
 python3 validator.py /절대/경로/example.png --format PNG --block-size 512 --block-index 0
 python3 validator.py /절대/경로/example.zip --format ZIP --block-size 512 --block-index 1

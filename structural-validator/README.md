@@ -88,3 +88,24 @@ ZIP LOCAL_FIXED_FIELDS의 VALID는 필드 읽기 성공만 뜻하며 메타데�
 - ZIP: https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT — 4.3.7 Local File Header, 4.3.9 Data Descriptor, 4.5 Extra Fields
 
 다음 확장에서는 별도 증거에 기반한 블록 판정 정책과 실제 데이터의 오탐/미탐 평가를 추가하세요.
+
+## FFC 예측 연동
+
+`ffc_pipeline.py`에는 NumPy가 필요합니다. 원본 입력 파일은 읽기만 하며 결과는 기본적으로 이 코드 폴더의 `ffc-output/실행시간/`에 저장합니다.
+
+```sh
+python3 ffc_pipeline.py \
+  --npz /home/yurim/tesserae_fifty/512_1/test.npz \
+  --meta /home/yurim/tesserae_fifty/512_1/test_meta.csv \
+  --predictions /home/yurim/ffc_results/B_fiftyRT_512/test_predictions.csv \
+  --limit 100
+```
+
+- NPZ의 x는 uint8 (N,512) 또는 (N,4096), y는 정수 (N,)이어야 합니다. x 전체를 메모리에 읽으므로 512바이트 696,320개는 배열만 약 340MiB이며 ID 목록 등 추가 메모리도 필요합니다.
+- 모든 행의 CSV ID·원본 파일 ID·정답, meta row·NPZ y 라벨을 검사합니다. 중복 ID와 행 수·순서 불일치는 중단합니다. 이 버전은 동일 순서 export만 허용하며 잘못된 순서를 추측해서 연결하지 않습니다.
+- NPZ 자체에는 확인한 범위에서 ID가 없으므로 이 검사는 NPZ/meta의 생성 과정상 순서 보장을 대체하지 않습니다. 같은 라벨 내 순서 변경이나 원본 바이트 변환 여부는 별도 확인해야 합니다.
+- predicted_type이 png/zip인 후보만 검사합니다. masked 예측은 사용하지 않습니다. 정답과 원본 offset을 검사에 전달하지 않습니다.
+- 기본 100개는 등장 순서상 앞의 후보로, 대표 표본이나 성능 평가가 아닌 연결 확인용입니다. 전체 실행은 `--limit 0`입니다.
+- `blocks.csv`: 블록별 규칙 상태 존재 여부. `evidence.jsonl`: 규칙별 증거와 원본 메타데이터. `summary.json`: 후보 수·검사 수·입력 경로.
+- has_invalid_rule은 구조 후보의 위반 증거가 있다는 뜻입니다. 블록 불가능성이나 오탐 제거 성공으로 집계하지 않으며 어떤 후보도 자동 제거하지 않습니다.
+- B/PT/RT 등의 학습 조건, data_representation의 의미, NPZ의 원본 바이트 보존 여부는 아직 확인이 필요합니다.

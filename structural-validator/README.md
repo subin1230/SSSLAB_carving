@@ -164,3 +164,31 @@ v1/v2는 각각 보존하며 기본값은 v3입니다. 두 블록을 연결하�
 - 경계 근거가 있어도 원본의 손상·내장 리소스·CRC 충돌 가능성을 배제하지 않으므로 FFC 후보는 자동 기각하지 않습니다. UNKNOWN 증가를 성능 향상이나 오탐 제거 성공으로 보고하지 않습니다.
 
 실행 예: 기존 명령에서 `--validator-version v3` 사용. 먼저 `--mode ground-truth`로 문제 사례를 점검하고, 동일 버전 `--mode prediction` 결과를 별도 수집하세요.
+
+### v4: 단일 블록 내부 값·항목 데이터 검사
+
+`--validator-version v4`로 선택한다. 비교 재현을 위해 기본값과 v1~v3는 유지한다.
+
+- PNG: sRGB rendering intent(0~3), pHYs 단위(0/1), 양수 gAMA,
+  tIME 월·일·시·분·초 범위를 추가 검사한다. CRC가 맞아도 필드가 명세를
+  위반하면 INVALID가 가능하다. 월별 실제 날짜 유효성 검사는 포함하지 않는다.
+- ZIP: 완전한 로컬 헤더와 항목 데이터가 단일 블록에 있으면 stored/DEFLATE
+  해제 크기와 데이터 CRC32를 검사한다. DEFLATE 종료 및 선언 구간도 확인한다.
+  해제 출력은 1 MiB로 제한하며 초과는 UNKNOWN이다.
+- ZIP 경계 근거: 같은 블록에 완전한 일반 단일 디스크 중앙 디렉터리와 EOCD가
+  있으면 선언된 상대 오프셋으로 로컬 헤더를 찾는다. 파일명도 일치해야 한다.
+  이때 로컬/중앙 flags·method·CRC·size 모순 및 데이터 오류는
+  `zip_directory_reference`에 기반한 조건부 증거로 기록한다.
+  중앙 디렉터리 순서와 로컬 파일 순서가 같다고 가정하지 않는다.
+- 암호화, descriptor, ZIP64, 미지원 압축 방식은 payload 검사를 보류한다.
+  구조가 잘리거나 디렉터리 연결을 확인할 수 없으면 자동 경계 확정을 하지 않는다.
+- `status`는 가정한 구조 후보의 규칙 결과이고 `evidence_status`는 경계 근거까지
+  반영한 결과다. FFC 후보 자동 기각은 계속 수행하지 않는다.
+  `invalid_evidence_on_wrong` 등 기존 raw 집계를 오탐 제거 성공률로 사용하면 안 된다.
+
+근거: [W3C PNG 명세](https://www.w3.org/TR/png/),
+[PKWARE APPNOTE](https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT).
+
+실제 512바이트 데이터는 로컬 헤더조차 희소했다. 추가 조건이 성립하지 않으면
+v4에서도 UNKNOWN 또는 근거 있는 INVALID 0건이 유지될 수 있다.
+새 규칙의 단위 테스트 성공은 실제 데이터셋에서의 제거 효과를 뜻하지 않는다.

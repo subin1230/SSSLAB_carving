@@ -45,6 +45,9 @@ class PipelineModeTests(unittest.TestCase):
             self.assertEqual(v3['validator_version'], 'v3')
             self.assertIn('evidence_counts', v3)
             self.assertEqual(v3['inspected_counts']['boundary_supported_invalid_blocks'], 0)
+            v4 = collect(root/'data.npz',root/'meta.csv',root/'pred.csv',root/'v4',0,'v4','prediction')
+            self.assertEqual(v4['validator_version'], 'v4')
+            self.assertEqual(v4['inspected_counts']['boundary_supported_invalid_blocks'], 0)
             # ID mismatch must still stop diagnostic mode before output creation.
             preds[0]['block_id']='wrong'
             with (root/'pred.csv').open('w',newline='') as f:

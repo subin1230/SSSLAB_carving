@@ -9,6 +9,7 @@ from pathlib import Path
 
 import numpy as np
 from validator import validate_block
+from validator_v4 import validate_block as validate_v4
 from validator_v2 import validate_block as validate_v2
 from validator_v1 import validate_block as validate_v1
 
@@ -16,7 +17,7 @@ from validator_v1 import validate_block as validate_v1
 def collect(npz_path, meta_path, predictions_path, output, limit=100, version="v3", mode="prediction"):
     if mode not in ("prediction", "ground-truth"):
         raise ValueError("알 수 없는 선택 모드")
-    check = {"v1": validate_v1, "v2": validate_v2, "v3": validate_block}[version]
+    check = {"v1": validate_v1, "v2": validate_v2, "v3": validate_block, "v4": validate_v4}[version]
     if limit < 0:
         raise ValueError('limit은 0(전체) 또는 양수여야 합니다')
     with np.load(npz_path, allow_pickle=False) as archive:
@@ -90,7 +91,7 @@ def collect(npz_path, meta_path, predictions_path, output, limit=100, version="v
             statuses = {r['status'] for r in results}
             for result in results:
                 rule_counts[f"{fmt} | {result['rule']} | {result['status']}"] += 1
-            if version == 'v3':
+            if version in ('v3', 'v4'):
                 evidence_states = {r['evidence_status'] for r in results}
                 for r in results:
                     boundary_counts[f"{fmt} | {r['boundary_evidence']}"] += 1
@@ -137,7 +138,7 @@ def main():
     parser.add_argument('--meta', required=True)
     parser.add_argument('--predictions', required=True)
     parser.add_argument('--mode', choices=['prediction', 'ground-truth'], default='prediction', help='ground-truth는 정답 기반 진단 전용')
-    parser.add_argument('--validator-version', choices=['v1', 'v2', 'v3'], default='v3')
+    parser.add_argument('--validator-version', choices=['v1', 'v2', 'v3', 'v4'], default='v3')
     parser.add_argument('--limit', type=int, default=100, help='0이면 모든 PNG/ZIP 예측 후보 검사')
     parser.add_argument('--output', default=str(Path(__file__).resolve().parent / 'ffc-output' / datetime.now().strftime('%Y%m%d-%H%M%S-%f')))
     args = parser.parse_args()

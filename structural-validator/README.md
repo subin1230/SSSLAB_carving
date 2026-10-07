@@ -133,3 +133,19 @@ FFC 실행 시 `--validator-version v1` 또는 `--validator-version v2`로 선�
 CRC 일치나 ZIP 구조가 다른 포맷 라벨에서 발견돼도 내장 리소스/컨테이너일 수 있으므로 라벨과 바이트 구조를 구분해야 합니다.
 현재 같은 테스트셋의 결과를 보고 규칙을 개선 중이므로 이후 결과는 탐색적 개발 결과로 기록합니다. 독립 평가 없이 일반화 성능으로 보고하지 않습니다.
 서버 데이터는 로컬에서 접근하지 못했으므로 v2 실데이터 개선 효과는 서버 재실행 후 확인합니다.
+
+## 정답 PNG/ZIP 진단 모드
+
+기존 FFC 후보 실험은 `--mode prediction`(기본값), 정답 PNG/ZIP의 검사 가능 범위 진단은 `--mode ground-truth`입니다.
+후자는 정답이 PNG/ZIP인 블록을 선택하고 정답 포맷 규칙을 적용합니다. FFC가 다른 포맷으로 예측한 블록도 포함됩니다.
+이 결과를 FFC 후보 제거 성능으로 해석하지 마세요. 데이터 대응 확인과 예측별 비교를 위해 같은 예측 CSV를 계속 받습니다.
+CSV/JSONL에는 selection_mode, validation_format, 원래 predicted_type을 구분해 저장합니다. ffc_correct는 모드와 무관하게 원래 예측과 정답의 일치 여부입니다.
+summary에는 selection_mode와 uses_ground_truth_for_validation이 기록됩니다. per_format의 no_structure_candidate는 구조 단서 없음, unknown_only는 모든 규칙 UNKNOWN, has_valid_rule/has_invalid_rule은 해당 판정이 하나 이상인 블록 수입니다.
+
+```sh
+python3 ffc_pipeline.py \
+  --npz /home/yurim/tesserae_fifty/512_1/test.npz \
+  --meta /home/yurim/tesserae_fifty/512_1/test_meta.csv \
+  --predictions /home/yurim/ffc_results/B_fiftyRT_512/test_predictions.csv \
+  --validator-version v2 --mode ground-truth --limit 0
+```

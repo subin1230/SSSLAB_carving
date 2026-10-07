@@ -12,7 +12,9 @@ from validator import validate_block
 from validator_v1 import validate_block as validate_v1
 
 
-def collect(npz_path, meta_path, predictions_path, output, limit=100, version="v2"):
+def collect(npz_path, meta_path, predictions_path, output, limit=100, version="v2", mode="prediction"):
+    if mode not in ("prediction", "ground-truth"):
+        raise ValueError("알 수 없는 선택 모드")
     check = validate_v1 if version == "v1" else validate_block
     if limit < 0:
         raise ValueError('limit은 0(전체) 또는 양수여야 합니다')
@@ -56,16 +58,17 @@ def collect(npz_path, meta_path, predictions_path, output, limit=100, version="v
             if label in label_types and label_types[label] != truth:
                 raise ValueError(f'{i}행: 같은 라벨에 다른 포맷 이름')
             label_types[label] = truth
-            fmt = pred['predicted_type'].lower()
+            predicted = pred['predicted_type'].lower()
+            fmt = truth if mode == 'ground-truth' else predicted
             if fmt in ('png', 'zip'):
                 candidates[fmt] += 1
-                confusion[f'{truth} -> {fmt}'] += 1
+                confusion[f'{truth} -> {predicted}'] += 1
                 if limit == 0 or len(selected) < limit:
                     selected.append((i, meta, pred))
             count += 1
     if count != len(x):
         raise ValueError('NPZ와 CSV 행 수 불일치')
-    print(f'전체 {count:,}행 대응 검사 통과. PNG/ZIP 예측 후보: {dict(candidates)}', flush=True)
+    print(f'전체 {count:,}행 대응 검사 통과. 모드={mode}, PNG/ZIP 선택 블록: {dict(candidates)}', flush=True)
 
     output = Path(output)
     output.mkdir(parents=True, exist_ok=False)
@@ -73,37 +76,40 @@ def collect(npz_path, meta_path, predictions_path, output, limit=100, version="v
     rule_counts = Counter()
     per_format = {}
     with (output / 'evidence.jsonl').open('w', encoding='utf-8') as detail, (output / 'blocks.csv').open('w', newline='', encoding='utf-8-sig') as bf:
-        columns = ['row', 'block_id', 'predicted_type', 'ground_truth_type', 'ffc_correct',
+        columns = ['row', 'block_id', 'selection_mode', 'validation_format', 'predicted_type', 'ground_truth_type', 'ffc_correct',
                    'has_invalid_rule', 'has_valid_rule', 'has_unknown_rule', 'rule_count']
         writer = csv.DictWriter(bf, fieldnames=columns)
         writer.writeheader()
         for i, meta, pred in selected:
-            fmt, truth = pred['predicted_type'].lower(), meta['ground_truth_type'].lower()
-            results = check(x[i].tobytes(), fmt)  # 정답 라벨·원본 offset은 검사에 전달하지 않음
+            predicted, truth = pred['predicted_type'].lower(), meta['ground_truth_type'].lower()
+            fmt = truth if mode == 'ground-truth' else predicted
+            results = check(x[i].tobytes(), fmt)  # 정답 포맷 사용은 진단 모드에 한정
             statuses = {r['status'] for r in results}
             for result in results:
                 rule_counts[f"{fmt} | {result['rule']} | {result['status']}"] += 1
             group = per_format.setdefault(fmt, Counter())
             group['inspected'] += 1
-            group['ffc_correct' if fmt == truth else 'ffc_wrong'] += 1
+            group['ffc_correct' if predicted == truth else 'ffc_wrong'] += 1
             group['has_invalid_rule'] += int('INVALID' in statuses)
+            group['has_valid_rule'] += int('VALID' in statuses)
+            group['no_structure_candidate'] += int(all(r['rule'] == 'STRUCTURE_EVIDENCE' for r in results))
             group['unknown_only'] += int(statuses == {'UNKNOWN'})
-            record = dict(row=i, block_id=meta['block_id'], predicted_type=fmt,
-                          ground_truth_type=truth, ffc_correct=fmt == truth,
+            record = dict(row=i, block_id=meta['block_id'], selection_mode=mode, validation_format=fmt, predicted_type=predicted,
+                          ground_truth_type=truth, ffc_correct=predicted == truth,
                           has_invalid_rule='INVALID' in statuses, has_valid_rule='VALID' in statuses,
                           has_unknown_rule='UNKNOWN' in statuses, rule_count=len(results))
             writer.writerow(record)
             detail.write(json.dumps(dict(record, metadata=meta, prediction=pred,
                                          results=results, rejection_applied=False), ensure_ascii=False) + '\n')
             counts['inspected'] += 1
-            counts['ffc_correct' if fmt == truth else 'ffc_wrong'] += 1
+            counts['ffc_correct' if predicted == truth else 'ffc_wrong'] += 1
             if 'INVALID' in statuses:
-                counts['invalid_evidence_on_correct' if fmt == truth else 'invalid_evidence_on_wrong'] += 1
+                counts['invalid_evidence_on_correct' if predicted == truth else 'invalid_evidence_on_wrong'] += 1
             if statuses == {'UNKNOWN'}:
                 counts['unknown_only'] += 1
     summary = dict(inputs={k: str(Path(v).resolve()) for k, v in
                            [('npz', npz_path), ('metadata', meta_path), ('predictions', predictions_path)]},
-                   validator_version=version, total_rows=count, block_size=x.shape[1], prediction_column='predicted_type',
+                   selection_mode=mode, uses_ground_truth_for_validation=(mode == "ground-truth"), validator_version=version, total_rows=count, block_size=x.shape[1], prediction_column='predicted_type',
                    candidates=dict(candidates), candidate_confusion=dict(confusion),
                    inspected_counts=dict(counts), rule_counts=dict(rule_counts), per_format=per_format, limit=limit,
                    selection='first matching rows; smoke test, not representative' if limit else 'all matching rows',
@@ -119,11 +125,12 @@ def main():
     parser.add_argument('--npz', required=True)
     parser.add_argument('--meta', required=True)
     parser.add_argument('--predictions', required=True)
+    parser.add_argument('--mode', choices=['prediction', 'ground-truth'], default='prediction', help='ground-truth는 정답 기반 진단 전용')
     parser.add_argument('--validator-version', choices=['v1', 'v2'], default='v2')
     parser.add_argument('--limit', type=int, default=100, help='0이면 모든 PNG/ZIP 예측 후보 검사')
     parser.add_argument('--output', default=str(Path(__file__).resolve().parent / 'ffc-output' / datetime.now().strftime('%Y%m%d-%H%M%S-%f')))
     args = parser.parse_args()
-    collect(args.npz, args.meta, args.predictions, args.output, args.limit, args.validator_version)
+    collect(args.npz, args.meta, args.predictions, args.output, args.limit, args.validator_version, args.mode)
 
 
 if __name__ == '__main__':

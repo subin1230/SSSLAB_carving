@@ -195,6 +195,20 @@ v4에서도 UNKNOWN 또는 근거 있는 INVALID 0건이 유지될 수 있다.
 
 ### 단서 적용 범위 조사 (검사 규칙 변경 없음)
 
+### v5: ZIP 로컬 항목 사이의 조건부 위치 관계
+
+`--validator-version v5`는 v4 검사를 유지하고 `LOCAL_ENTRY_ADJACENCY`를 추가한다.
+완전한 로컬 헤더의 이름·extra 길이와 압축 크기로 계산한 항목 끝에
+다음 완전한 로컬 헤더가 있으면 원시 status VALID를 기록한다.
+다음 항목 데이터는 블록 밖에 있어도 되지만 다음 헤더는 모두 확보해야 한다.
+암호화·descriptor·ZIP64 크기·미지원 압축 방식은 제외한다.
+다음 헤더가 없다는 사실은 INVALID로 처리하지 않는다.
+두 후보의 위치 일치는 독립적인 경계 확립이 아니므로 이 규칙의
+evidence_status는 UNKNOWN으로 유지한다. 자동 기각과 기존 경계 판정은 바꾸지 않는다.
+따라서 원시 VALID 증가를 정확도 향상으로 해석하지 않는다.
+
+### 단서 조사 실행
+
 기존 v3/v4 실행을 `python3 audit_clues.py --run /path/to/run`으로 분석한다.
 실행 summary에 기록된 NPZ를 읽으므로 동일 데이터 경로가 필요하다.
 `clue-output/날짜/`에 report.md, clue_summary.json, examples.jsonl을 저장한다.

@@ -1,130 +1,129 @@
-"""단일 블록의 구조 후보를 검사한다. 결과는 파일 전체 판정이 아니다."""
+"""v2: 부분 필드와 추가 레코드의 구조 증거. 블록 전체 판정은 아님."""
 import argparse
 import json
 import struct
-import zlib
+from validator_v1 import result, png_chunk as png_v1, zip_header as zip_v1
+
+VERSION = 'v2'
+PNG_TYPES = set(b'IHDR PLTE IDAT IEND cHRM gAMA iCCP sBIT sRGB tEXt zTXt iTXt bKGD hIST pHYs sPLT tIME eXIf acTL fcTL fdAT'.split())
+FIXED = {b'cHRM': 32, b'gAMA': 4, b'sRGB': 1, b'pHYs': 9, b'tIME': 7, b'acTL': 8, b'fcTL': 26}
 
 
-def result(fmt, offset, rule, status, reason, context):
-    return dict(format=fmt, offset=offset, rule=rule, status=status,
-                reason=reason, context=context, scope="structure_candidate")
-
-
-def png_chunk(block, offset=0, context="assumed_boundary"):
-    """offset이 청크 시작이라는 가정 아래 검사. CRC는 Type+Data 대상."""
-    rows = []
-    def add(rule, status, reason):
-        rows.append(result("PNG", offset, rule, status, reason, context))
-    if not 0 <= offset <= len(block):
-        raise ValueError("offset은 블록 범위 안이어야 합니다")
+def png_chunk(block, offset=0, context='assumed_boundary'):
+    rows = png_v1(block, offset, context)
     data = block[offset:]
-    if len(data) < 8:
-        add("CHUNK_HEADER", "UNKNOWN", "Length와 Type을 읽을 8바이트가 부족함")
+    if len(data) < 8 or any(r['rule'] in ('CHUNK_LENGTH', 'CHUNK_TYPE') for r in rows):
         return rows
-    length = int.from_bytes(data[:4], "big")
-    kind = data[4:8]
-    if length > 0x7fffffff:
-        add("CHUNK_LENGTH", "INVALID", "PNG 청크 길이의 최대값 2^31-1 초과")
-        return rows
-    if not all(65 <= b <= 90 or 97 <= b <= 122 for b in kind) or not 65 <= kind[2] <= 90:
-        add("CHUNK_TYPE", "INVALID", "Type은 영문 4바이트이며 세 번째 문자는 대문자여야 함")
-        return rows
-    add("CHUNK_HEADER", "VALID", "청크 길이 범위와 타입 문자 규칙 통과")
-    if kind in (b"IHDR", b"IEND"):
-        expected = 13 if kind == b"IHDR" else 0
-        add("FIXED_LENGTH", "VALID" if length == expected else "INVALID",
-            f"{kind.decode()} 데이터 길이: {length}, 요구값: {expected}")
-    if len(data) < length + 12:
-        add("CHUNK_CRC", "UNKNOWN", f"청크 전체 {length + 12}바이트 필요, 현재 {len(data)}바이트")
-        return rows
+    length, kind = int.from_bytes(data[:4], 'big'), bytes(data[4:8])
     payload = data[8:8 + length]
-    stored = int.from_bytes(data[8 + length:12 + length], "big")
-    computed = zlib.crc32(data[4:8 + length]) & 0xffffffff
-    add("CHUNK_CRC", "VALID" if stored == computed else "INVALID",
-        f"저장 CRC={stored:08x}, 계산 CRC={computed:08x}")
-    if kind == b"IHDR" and length == 13:
-        width, height, depth, color, compression, filtering, interlace = struct.unpack(">IIBBBBB", payload)
-        depths = {0: {1, 2, 4, 8, 16}, 2: {8, 16}, 3: {1, 2, 4, 8}, 4: {8, 16}, 6: {8, 16}}
-        ok = (0 < width <= 0x7fffffff and 0 < height <= 0x7fffffff
-              and depth in depths.get(color, set()) and compression == 0
-              and filtering == 0 and interlace in (0, 1))
-        add("IHDR_FIELDS", "VALID" if ok else "INVALID",
-            f"크기={width}x{height}, 비트깊이={depth}, 색상유형={color}, 압축={compression}, 필터={filtering}, 인터레이스={interlace}")
+    def add(rule, ok, reason):
+        rows.append(result('PNG', offset, rule, 'UNKNOWN' if ok is None else 'VALID' if ok else 'INVALID', reason, context))
+    if kind in FIXED:
+        add('ANCILLARY_LENGTH', length == FIXED[kind], f'{kind.decode()} 길이={length}, 요구={FIXED[kind]}')
+    if kind == b'PLTE':
+        add('PLTE_LENGTH', 3 <= length <= 768 and length % 3 == 0, f'팔레트는 1~256 RGB 항목: 길이={length}')
+    if kind == b'IHDR' and length == 13:
+        # CRC 또는 뒤 필드가 없더라도 확보한 필드만 독립 검사한다.
+        checks = [
+            ('IHDR_WIDTH', 4, lambda p: 0 < int.from_bytes(p[:4], 'big') <= 0x7fffffff),
+            ('IHDR_HEIGHT', 8, lambda p: 0 < int.from_bytes(p[4:8], 'big') <= 0x7fffffff),
+            ('IHDR_DEPTH_COLOR', 10, lambda p: p[8] in {0:{1,2,4,8,16},2:{8,16},3:{1,2,4,8},4:{8,16},6:{8,16}}.get(p[9], set())),
+            ('IHDR_COMPRESSION', 11, lambda p: p[10] == 0),
+            ('IHDR_FILTER', 12, lambda p: p[11] == 0),
+            ('IHDR_INTERLACE', 13, lambda p: p[12] in (0, 1))]
+        for rule, needed, check in checks:
+            add(rule, check(payload) if len(payload) >= needed else None,
+                f'IHDR 데이터 {needed}바이트 필요, 확보={len(payload)}; 해당 필드 명세 검사')
     return rows
 
 
-def zip_header(block, offset=0, context="assumed_boundary"):
-    """Local File Header만 검사. payload CRC, 전체 ZIP 검증은 하지 않음."""
-    rows = []
-    def add(rule, status, reason):
-        rows.append(result("ZIP", offset, rule, status, reason, context))
-    if not 0 <= offset <= len(block):
-        raise ValueError("offset은 블록 범위 안이어야 합니다")
+def size_rule(data, offset, context, flags_at, method_at, size_at, rule):
+    if len(data) < size_at + 8:
+        return result('ZIP', offset, rule, 'UNKNOWN', '크기 필드까지의 바이트 부족', context)
+    flags = int.from_bytes(data[flags_at:flags_at+2], 'little')
+    method = int.from_bytes(data[method_at:method_at+2], 'little')
+    csize, usize = struct.unpack_from('<II', data, size_at)
+    if flags & (8 | 1 | 64 | 8192) or 0xffffffff in (csize, usize) or method != 0:
+        return result('ZIP', offset, rule, 'UNKNOWN', 'Data Descriptor/암호화/ZIP64/압축 항목은 이 크기 비교에서 제외', context)
+    return result('ZIP', offset, rule, 'VALID' if csize == usize else 'INVALID',
+                  f'비압축·비암호화 크기 비교: {csize} / {usize}', context)
+
+
+def zip_header(block, offset=0, context='assumed_boundary'):
+    rows = zip_v1(block, offset, context)
     data = block[offset:]
-    if len(data) < 4:
-        add("LOCAL_SIGNATURE", "UNKNOWN", "시그니처 4바이트 부족")
-        return rows
-    if data[:4] != b"PK\x03\x04":
-        add("LOCAL_SIGNATURE", "INVALID", "지정한 위치가 Local File Header 시그니처와 다름")
-        return rows
-    if len(data) < 30:
-        add("LOCAL_HEADER", "UNKNOWN", "고정 헤더 30바이트 부족")
-        return rows
-    _, version, flags, method, _, _, crc, csize, usize, nlen, xlen = struct.unpack("<4s5H3I2H", data[:30])
-    end = 30 + nlen + xlen
-    add("LOCAL_FIXED_FIELDS", "VALID", f"고정 필드 읽기 성공: version={version}, method={method}, filename_length={nlen}, extra_length={xlen}")
-    if len(data) < end:
-        add("LOCAL_HEADER_EXTENT", "UNKNOWN", f"가변 필드 포함 {end}바이트 필요, 현재 {len(data)}바이트")
-        return rows
-    add("LOCAL_HEADER_EXTENT", "VALID", "파일명과 추가 필드가 블록 안에 포함됨")
-    extra = data[30 + nlen:end]
-    pos = 0
-    while pos < len(extra):
-        if len(extra) - pos < 4:
-            add("EXTRA_FIELD_LAYOUT", "INVALID", "완전히 확보된 Extra Field 내부에 하위 헤더가 잘림")
+    if data[:4] == b'PK\x03\x04' and not any(r['rule'] == 'STORED_SIZE' or r['status'] == 'INVALID' for r in rows):
+        rows.append(size_rule(data, offset, context, 6, 8, 18, 'LOCAL_PARTIAL_STORED_SIZE'))
+    return rows
+
+
+def zip_record(block, offset=0, context='assumed_boundary'):
+    if not 0 <= offset <= len(block):
+        raise ValueError('offset 범위 오류')
+    data = block[offset:]
+    sig = data[:4]
+    if sig not in (b'PK\x01\x02', b'PK\x05\x06'):
+        return zip_header(block, offset, context)
+    rows = []
+    def add(rule, ok, reason):
+        rows.append(result('ZIP', offset, rule, 'UNKNOWN' if ok is None else 'VALID' if ok else 'INVALID', reason, context))
+    if sig == b'PK\x01\x02':
+        rows.append(size_rule(data, offset, context, 8, 10, 20, 'CENTRAL_STORED_SIZE'))
+        if len(data) < 46:
+            add('CENTRAL_HEADER', None, '고정 헤더 46바이트 부족')
             return rows
-        size = int.from_bytes(extra[pos + 2:pos + 4], "little")
-        pos += 4 + size
-        if pos > len(extra):
-            add("EXTRA_FIELD_LAYOUT", "INVALID", "하위 필드 길이가 선언된 Extra Field 영역을 초과함")
-            return rows
-    add("EXTRA_FIELD_LAYOUT", "VALID", "추가 필드의 길이 구조 통과 (내용별 의미 검증은 제외)")
-    if flags & 8:
-        reason = "Data Descriptor 사용: Local Header만으로 최종 크기·CRC 확정 불가"
-    elif flags & (1 | 64 | 8192):
-        reason = "암호화 관련 플래그 사용: 이 버전에서는 데이터 검증 미지원"
-    elif csize == 0xffffffff or usize == 0xffffffff:
-        reason = "ZIP64 크기 해석은 이 버전에서 미지원"
-    elif method not in (0, 8):
-        reason = f"압축 방식 {method}의 데이터 검증은 미지원"
+        nlen, xlen, clen = struct.unpack_from('<HHH', data, 28)
+        end = 46 + nlen + xlen + clen
+        add('CENTRAL_HEADER_EXTENT', True if len(data) >= end else None,
+            f'파일명·extra·주석 포함 {end}바이트 필요, 현재={len(data)}')
+        # 주석은 없어도 extra 영역이 다 있으면 TLV 검사 가능.
+        if len(data) >= 46 + nlen + xlen:
+            extra = data[46+nlen:46+nlen+xlen]
+            pos = 0
+            ok = True
+            while pos < len(extra):
+                if len(extra) - pos < 4:
+                    ok = False
+                    break
+                pos += 4 + int.from_bytes(extra[pos+2:pos+4], 'little')
+                if pos > len(extra):
+                    ok = False
+                    break
+            add('CENTRAL_EXTRA_LAYOUT', ok, '선언된 extra 영역 안의 하위 필드 길이 구조 검사')
     else:
-        if method == 0:
-            add("STORED_SIZE", "VALID" if csize == usize else "INVALID",
-                f"비압축·비암호화 entry의 크기는 같아야 함: compressed={csize}, uncompressed={usize}")
-        reason = "압축 데이터가 블록 밖으로 이어짐" if len(data) < end + csize else "헤더 검사만 수행함. 데이터 압축 해제·CRC 검증은 미구현"
-    add("ENTRY_DATA_CRC", "UNKNOWN", reason)
+        if len(data) < 22:
+            add('EOCD_HEADER', None, 'EOCD 고정 22바이트 부족')
+            return rows
+        disk, start_disk, here, total, size, start, comment = struct.unpack_from('<4H2IH', data, 4)
+        add('EOCD_EXTENT', True if len(data) >= 22 + comment else None,
+            f'주석 포함 {22+comment}바이트 필요, 현재={len(data)}')
+        if 0xffff in (disk, start_disk, here, total) or 0xffffffff in (size, start):
+            add('EOCD_COUNTS', None, 'ZIP64 sentinel: 추가 레코드 필요')
+        elif disk != 0 or start_disk != 0:
+            add('EOCD_COUNTS', None, '다중 디스크 조건: 이 버전에서 비교 보류')
+        else:
+            add('EOCD_COUNTS', here == total, f'단일 디스크 항목 수 비교: {here} / {total}')
+        add('ARCHIVE_LINKS', None, '전체 directory·local header·데이터 연결 검증은 수행하지 않음')
     return rows
 
 
 def validate_block(block, fmt, offset=None):
-    """자동 탐색은 후보의 증거만 반환. 후보 INVALID를 블록 INVALID로 집계하지 않는다."""
     fmt = fmt.upper()
-    if fmt not in ("PNG", "ZIP"):
-        raise ValueError("PNG 또는 ZIP을 지정하세요")
-    check = png_chunk if fmt == "PNG" else zip_header
+    if fmt not in ('PNG', 'ZIP'):
+        raise ValueError('PNG 또는 ZIP을 지정하세요')
+    check = png_chunk if fmt == 'PNG' else zip_record
     if offset is not None:
         return check(block, offset)
-    rows = []
-    if fmt == "ZIP":
-        offsets = [i for i in range(len(block)) if block.startswith(b"PK\x03\x04", i)]
+    if fmt == 'PNG':
+        offsets = [i for i in range(max(0, len(block)-7)) if bytes(block[i+4:i+8]) in PNG_TYPES]
     else:
-        # 무작위 바이트의 오탐을 줄이기 위해 자동 탐색은 핵심 4개 청크로 제한.
-        offsets = [i for i in range(max(0, len(block) - 7))
-                   if block[i + 4:i + 8] in (b"IHDR", b"PLTE", b"IDAT", b"IEND")]
+        signatures = (b'PK\x03\x04', b'PK\x01\x02', b'PK\x05\x06')
+        offsets = [i for i in range(max(0, len(block)-3)) if block[i:i+4] in signatures]
+    rows = []
     for i in offsets:
-        rows.extend(check(block, i, "scanned_candidate"))
-    return rows or [result(fmt, None, "STRUCTURE_EVIDENCE", "UNKNOWN",
-                          "검사 가능한 구조 후보 없음. 중간 데이터일 수 있어 포맷을 부정하지 않음", "unanchored")]
+        rows.extend(check(block, i, 'scanned_candidate'))
+    return rows or [result(fmt, None, 'STRUCTURE_EVIDENCE', 'UNKNOWN',
+                          '검사 가능한 구조 후보 없음. 중간 데이터일 수 있어 포맷을 부정하지 않음', 'unanchored')]
 
 
 def main():

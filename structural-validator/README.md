@@ -109,3 +109,27 @@ python3 ffc_pipeline.py \
 - `blocks.csv`: 블록별 규칙 상태 존재 여부. `evidence.jsonl`: 규칙별 증거와 원본 메타데이터. `summary.json`: 후보 수·검사 수·입력 경로.
 - has_invalid_rule은 구조 후보의 위반 증거가 있다는 뜻입니다. 블록 불가능성이나 오탐 제거 성공으로 집계하지 않으며 어떤 후보도 자동 제거하지 않습니다.
 - B/PT/RT 등의 학습 조건, data_representation의 의미, NPZ의 원본 바이트 보존 여부는 아직 확인이 필요합니다.
+
+## v2: 고정 데이터에서 검사 범위 확장
+
+기존 구현은 `validator_v1.py`에 그대로 보존합니다. `validator.py`는 v2이며 v1의 기본 검사를 재사용합니다.
+FFC 실행 시 `--validator-version v1` 또는 `--validator-version v2`로 선택합니다(기본 v2).
+이전 v1 summary에는 version이 없지만 새 실행에는 `validator_version`, `rule_counts`, `per_format`을 기록합니다.
+
+추가 규칙:
+- PNG: 알려진 23종 청크 이름으로 탐색 확대. 모든 영문 4바이트를 청크로 간주하지 않습니다.
+- PNG: PLTE 길이 3~768, 3의 배수 검사. cHRM/gAMA/sRGB/pHYs/tIME/acTL/fcTL 고정 길이 검사.
+- PNG: IHDR의 width/height/depth+color/compression/filter/interlace를 확보된 필드별로 검사. CRC 부족은 필드 검사 중단 사유가 아닙니다.
+- ZIP: 로컬 헤더가 30바이트 미만이거나 파일명이 잘려도 크기 필드까지 확보되면 제한된 비압축 크기 비교.
+- ZIP: Central Directory 파일 헤더(46바이트+가변 필드) 후보의 범위·extra 길이 구조·제한된 비압축 크기 비교.
+- ZIP: EOCD(22바이트+주석) 범위와 단일 디스크 항목 수 일치. ZIP64 sentinel과 다중 디스크는 UNKNOWN으로 보류.
+
+근거: PNG W3C Third Edition 11.2.1, 11.2.2, 11.3의 해당 청크 정의 및 PKWARE APPNOTE 4.3.7, 4.3.12, 4.3.16.
+- https://www.w3.org/TR/png-3/
+- https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT
+
+범위: EOCD/central 검사는 레코드 내부만 검사하며 실제 전체 ZIP 연결을 보장하지 않습니다. 부분 구조가 없으면 계속 UNKNOWN입니다.
+명시적 구조 시작 위치로 검사하지 않은 탐색 후보는 우연히 데이터 내부에 나타날 수 있습니다. INVALID를 포맷 기각으로 자동 승격하지 않습니다.
+CRC 일치나 ZIP 구조가 다른 포맷 라벨에서 발견돼도 내장 리소스/컨테이너일 수 있으므로 라벨과 바이트 구조를 구분해야 합니다.
+현재 같은 테스트셋의 결과를 보고 규칙을 개선 중이므로 이후 결과는 탐색적 개발 결과로 기록합니다. 독립 평가 없이 일반화 성능으로 보고하지 않습니다.
+서버 데이터는 로컬에서 접근하지 못했으므로 v2 실데이터 개선 효과는 서버 재실행 후 확인합니다.

@@ -9,9 +9,11 @@ from pathlib import Path
 
 import numpy as np
 from validator import validate_block
+from validator_v1 import validate_block as validate_v1
 
 
-def collect(npz_path, meta_path, predictions_path, output, limit=100):
+def collect(npz_path, meta_path, predictions_path, output, limit=100, version="v2"):
+    check = validate_v1 if version == "v1" else validate_block
     if limit < 0:
         raise ValueError('limit은 0(전체) 또는 양수여야 합니다')
     with np.load(npz_path, allow_pickle=False) as archive:
@@ -68,6 +70,8 @@ def collect(npz_path, meta_path, predictions_path, output, limit=100):
     output = Path(output)
     output.mkdir(parents=True, exist_ok=False)
     counts = Counter()
+    rule_counts = Counter()
+    per_format = {}
     with (output / 'evidence.jsonl').open('w', encoding='utf-8') as detail, (output / 'blocks.csv').open('w', newline='', encoding='utf-8-sig') as bf:
         columns = ['row', 'block_id', 'predicted_type', 'ground_truth_type', 'ffc_correct',
                    'has_invalid_rule', 'has_valid_rule', 'has_unknown_rule', 'rule_count']
@@ -75,8 +79,15 @@ def collect(npz_path, meta_path, predictions_path, output, limit=100):
         writer.writeheader()
         for i, meta, pred in selected:
             fmt, truth = pred['predicted_type'].lower(), meta['ground_truth_type'].lower()
-            results = validate_block(x[i].tobytes(), fmt)  # 정답 라벨·원본 offset은 검사에 전달하지 않음
+            results = check(x[i].tobytes(), fmt)  # 정답 라벨·원본 offset은 검사에 전달하지 않음
             statuses = {r['status'] for r in results}
+            for result in results:
+                rule_counts[f"{fmt} | {result['rule']} | {result['status']}"] += 1
+            group = per_format.setdefault(fmt, Counter())
+            group['inspected'] += 1
+            group['ffc_correct' if fmt == truth else 'ffc_wrong'] += 1
+            group['has_invalid_rule'] += int('INVALID' in statuses)
+            group['unknown_only'] += int(statuses == {'UNKNOWN'})
             record = dict(row=i, block_id=meta['block_id'], predicted_type=fmt,
                           ground_truth_type=truth, ffc_correct=fmt == truth,
                           has_invalid_rule='INVALID' in statuses, has_valid_rule='VALID' in statuses,
@@ -92,9 +103,9 @@ def collect(npz_path, meta_path, predictions_path, output, limit=100):
                 counts['unknown_only'] += 1
     summary = dict(inputs={k: str(Path(v).resolve()) for k, v in
                            [('npz', npz_path), ('metadata', meta_path), ('predictions', predictions_path)]},
-                   total_rows=count, block_size=x.shape[1], prediction_column='predicted_type',
+                   validator_version=version, total_rows=count, block_size=x.shape[1], prediction_column='predicted_type',
                    candidates=dict(candidates), candidate_confusion=dict(confusion),
-                   inspected_counts=dict(counts), limit=limit,
+                   inspected_counts=dict(counts), rule_counts=dict(rule_counts), per_format=per_format, limit=limit,
                    selection='first matching rows; smoke test, not representative' if limit else 'all matching rows',
                    rejection_applied=False,
                    note='INVALID는 구조 후보의 규칙 위반 증거이며 블록 또는 FFC 후보 기각이 아님.')
@@ -108,10 +119,11 @@ def main():
     parser.add_argument('--npz', required=True)
     parser.add_argument('--meta', required=True)
     parser.add_argument('--predictions', required=True)
+    parser.add_argument('--validator-version', choices=['v1', 'v2'], default='v2')
     parser.add_argument('--limit', type=int, default=100, help='0이면 모든 PNG/ZIP 예측 후보 검사')
     parser.add_argument('--output', default=str(Path(__file__).resolve().parent / 'ffc-output' / datetime.now().strftime('%Y%m%d-%H%M%S-%f')))
     args = parser.parse_args()
-    collect(args.npz, args.meta, args.predictions, args.output, args.limit)
+    collect(args.npz, args.meta, args.predictions, args.output, args.limit, args.validator_version)
 
 
 if __name__ == '__main__':

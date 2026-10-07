@@ -4,7 +4,7 @@ import json
 import struct
 from validator_v1 import result, png_chunk as png_v1, zip_header as zip_v1
 
-VERSION = 'v3'
+VERSION = 'v2'
 PNG_TYPES = set(b'IHDR PLTE IDAT IEND cHRM gAMA iCCP sBIT sRGB tEXt zTXt iTXt bKGD hIST pHYs sPLT tIME eXIf acTL fcTL fdAT'.split())
 FIXED = {b'cHRM': 32, b'gAMA': 4, b'sRGB': 1, b'pHYs': 9, b'tIME': 7, b'acTL': 8, b'fcTL': 26}
 
@@ -107,7 +107,7 @@ def zip_record(block, offset=0, context='assumed_boundary'):
     return rows
 
 
-def _scan_v2(block, fmt, offset=None):
+def validate_block(block, fmt, offset=None):
     fmt = fmt.upper()
     if fmt not in ('PNG', 'ZIP'):
         raise ValueError('PNG 또는 ZIP을 지정하세요')
@@ -124,70 +124,6 @@ def _scan_v2(block, fmt, offset=None):
         rows.extend(check(block, i, 'scanned_candidate'))
     return rows or [result(fmt, None, 'STRUCTURE_EVIDENCE', 'UNKNOWN',
                           '검사 가능한 구조 후보 없음. 중간 데이터일 수 있어 포맷을 부정하지 않음', 'unanchored')]
-
-
-def validate_block(block, fmt, offset=None):
-    """원래 규칙 status와 경계 근거를 반영한 evidence_status를 분리한다."""
-    block = bytes(block)
-    fmt = fmt.upper()
-    rows = _scan_v2(block, fmt, offset)
-    if offset is not None:
-        for r in rows:
-            r.update(boundary_evidence='caller_assumed', evidence_status=r['status'],
-                     boundary_note='호출자가 지정한 경계라는 가정 아래의 판정; 검증된 경계라는 뜻은 아님')
-        return rows
-    boundaries = {}
-    payloads = []
-    if fmt == 'PNG':
-        # CRC가 맞는 완전한 비어있지 않은 청크는 내용 범위와 다음 경계의 근거.
-        for r in rows:
-            if r['rule'] == 'CHUNK_CRC' and r['status'] == 'VALID':
-                start = r['offset']
-                length = int.from_bytes(block[start:start+4], 'big')
-                if length:
-                    payloads.append((start+8, start+8+length))
-                    boundaries[start] = 'crc_consistent_chunk'
-                    if block[start+4:start+8] != b'IEND':
-                        boundaries.setdefault(start+length+12, 'after_crc_chunk')
-        # PNG 시그니처를 실제 블록 안에서 찾은 경우에만 처음부터 순차 파싱.
-        signature = b'\x89PNG\r\n\x1a\n'
-        begin = block.find(signature)
-        while begin >= 0:
-            cursor = begin + 8
-            first = True
-            while cursor + 8 <= len(block):
-                if first and block[cursor+4:cursor+8] != b'IHDR':
-                    break
-                boundaries[cursor] = 'png_signature_chain'
-                current = png_chunk(block, cursor, 'scanned_candidate')
-                if not any(r['rule'] == 'CHUNK_CRC' and r['status'] == 'VALID' for r in current):
-                    break
-                if any(r['status'] == 'INVALID' for r in current):
-                    break
-                length = int.from_bytes(block[cursor:cursor+4], 'big')
-                if block[cursor+4:cursor+8] == b'IEND':
-                    break
-                cursor += length + 12
-                first = False
-            begin = block.find(signature, begin+1)
-        # 확립한 앞 청크의 길이로 다음 위치를 얻었으면 미등록 타입도 일반 구조 검사.
-        existing = {r['offset'] for r in rows}
-        for cursor in sorted(boundaries):
-            if cursor not in existing and cursor + 8 <= len(block):
-                rows.extend(png_chunk(block, cursor, 'scanned_candidate'))
-    for r in rows:
-        start = r['offset']
-        if start is None:
-            evidence = 'no_candidate'
-        elif fmt == 'PNG' and any(a <= start and start + 8 <= b for a, b in payloads):
-            evidence = 'inside_crc_checked_payload'
-        else:
-            evidence = boundaries.get(start, 'signature_only')
-        supported = evidence in ('png_signature_chain', 'after_crc_chunk', 'crc_consistent_chunk')
-        r.update(boundary_evidence=evidence,
-                 evidence_status=r['status'] if supported else 'UNKNOWN',
-                 boundary_note='블록 내부 근거에 따른 조건부 증거; 파일 포맷 또는 원본 무결성 확정 아님')
-    return rows
 
 
 def main():

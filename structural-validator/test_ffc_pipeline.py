@@ -40,6 +40,10 @@ class PipelineModeTests(unittest.TestCase):
                     self.assertEqual(records[0]['predicted_type'],'jpg')
                     self.assertFalse(records[0]['ffc_correct'])
                     self.assertIn(('CHUNK_CRC','VALID'),[(r['rule'],r['status']) for r in records[0]['results']])
+            v3 = collect(root/'data.npz',root/'meta.csv',root/'pred.csv',root/'v3',0,'v3','ground-truth')
+            self.assertEqual(v3['validator_version'], 'v3')
+            self.assertIn('evidence_counts', v3)
+            self.assertEqual(v3['inspected_counts']['boundary_supported_invalid_blocks'], 0)
             # ID mismatch must still stop diagnostic mode before output creation.
             preds[0]['block_id']='wrong'
             with (root/'pred.csv').open('w',newline='') as f:

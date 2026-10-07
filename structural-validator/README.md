@@ -149,3 +149,18 @@ python3 ffc_pipeline.py \
   --predictions /home/yurim/ffc_results/B_fiftyRT_512/test_predictions.csv \
   --validator-version v2 --mode ground-truth --limit 0
 ```
+
+## v3: 단일 블록 경계 근거 분리
+
+v1/v2는 각각 보존하며 기본값은 v3입니다. 두 블록을 연결하거나 원본 파일 offset을 검사에 사용하지 않습니다.
+
+- `status`: 이전과 같은 조건부 규칙 검사 결과. 문자열 후보의 위반도 삭제하지 않습니다.
+- `boundary_evidence`: PNG 시그니처에서 CRC 확인하며 따라온 경계(png_signature_chain), 완전한 비어있지 않은 청크의 CRC 일치(crc_consistent_chunk), 그 청크 직후 위치(after_crc_chunk), 단순 문자열/시그니처 일치(signature_only), CRC 확인된 데이터 내부(inside_crc_checked_payload), 단서 없음(no_candidate), 호출자가 지정한 위치(caller_assumed).
+- `evidence_status`: 경계 근거가 부족하거나 다른 CRC 확인 청크의 내용 안에 있는 후보는 UNKNOWN. 시그니처·CRC 기반 경계 근거가 있는 후보는 원래 규칙 판정을 유지합니다. 이는 휴리스틱 증거 분류로, 인증이나 포맷 전체 판정이 아닙니다.
+- PNG 내부의 경계는 길이와 CRC를 이용해 추적합니다. 미등록 청크도 이렇게 얻은 위치에서 일반 구조 검사할 수 있습니다. IEND만 단독 발견하면 고정 패턴 증거로만 기록합니다.
+- ZIP은 이번 버전에 추가 경계 확립 로직을 구현하지 않았습니다. 자동 탐색은 signature_only로 보수적으로 보류하며 기존 원시 규칙 결과는 남습니다.
+- 명시적 offset은 caller_assumed입니다. 사용자가 제공한 가정이며 확인된 경계라는 뜻은 아닙니다.
+- 기존 summary의 has_invalid_rule/invalid_evidence_on_wrong 등은 계속 원시 status 기준입니다. 새 boundary_supported_invalid_blocks와 unanchored_invalid_blocks, evidence_unknown_only_blocks를 함께 봐야 합니다. boundary_counts/evidence_counts는 규칙 행 수이며 블록 수와 다릅니다.
+- 경계 근거가 있어도 원본의 손상·내장 리소스·CRC 충돌 가능성을 배제하지 않으므로 FFC 후보는 자동 기각하지 않습니다. UNKNOWN 증가를 성능 향상이나 오탐 제거 성공으로 보고하지 않습니다.
+
+실행 예: 기존 명령에서 `--validator-version v3` 사용. 먼저 `--mode ground-truth`로 문제 사례를 점검하고, 동일 버전 `--mode prediction` 결과를 별도 수집하세요.

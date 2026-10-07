@@ -9,13 +9,14 @@ from pathlib import Path
 
 import numpy as np
 from validator import validate_block
+from validator_v2 import validate_block as validate_v2
 from validator_v1 import validate_block as validate_v1
 
 
-def collect(npz_path, meta_path, predictions_path, output, limit=100, version="v2", mode="prediction"):
+def collect(npz_path, meta_path, predictions_path, output, limit=100, version="v3", mode="prediction"):
     if mode not in ("prediction", "ground-truth"):
         raise ValueError("알 수 없는 선택 모드")
-    check = validate_v1 if version == "v1" else validate_block
+    check = {"v1": validate_v1, "v2": validate_v2, "v3": validate_block}[version]
     if limit < 0:
         raise ValueError('limit은 0(전체) 또는 양수여야 합니다')
     with np.load(npz_path, allow_pickle=False) as archive:
@@ -74,6 +75,8 @@ def collect(npz_path, meta_path, predictions_path, output, limit=100, version="v
     output.mkdir(parents=True, exist_ok=False)
     counts = Counter()
     rule_counts = Counter()
+    boundary_counts = Counter()
+    evidence_counts = Counter()
     per_format = {}
     with (output / 'evidence.jsonl').open('w', encoding='utf-8') as detail, (output / 'blocks.csv').open('w', newline='', encoding='utf-8-sig') as bf:
         columns = ['row', 'block_id', 'selection_mode', 'validation_format', 'predicted_type', 'ground_truth_type', 'ffc_correct',
@@ -87,6 +90,14 @@ def collect(npz_path, meta_path, predictions_path, output, limit=100, version="v
             statuses = {r['status'] for r in results}
             for result in results:
                 rule_counts[f"{fmt} | {result['rule']} | {result['status']}"] += 1
+            if version == 'v3':
+                evidence_states = {r['evidence_status'] for r in results}
+                for r in results:
+                    boundary_counts[f"{fmt} | {r['boundary_evidence']}"] += 1
+                    evidence_counts[f"{fmt} | {r['rule']} | {r['evidence_status']}"] += 1
+                counts['boundary_supported_invalid_blocks'] += int('INVALID' in evidence_states)
+                counts['unanchored_invalid_blocks'] += int(any(r['status']=='INVALID' and r['evidence_status']=='UNKNOWN' for r in results))
+                counts['evidence_unknown_only_blocks'] += int(evidence_states == {'UNKNOWN'})
             group = per_format.setdefault(fmt, Counter())
             group['inspected'] += 1
             group['ffc_correct' if predicted == truth else 'ffc_wrong'] += 1
@@ -111,7 +122,7 @@ def collect(npz_path, meta_path, predictions_path, output, limit=100, version="v
                            [('npz', npz_path), ('metadata', meta_path), ('predictions', predictions_path)]},
                    selection_mode=mode, uses_ground_truth_for_validation=(mode == "ground-truth"), validator_version=version, total_rows=count, block_size=x.shape[1], prediction_column='predicted_type',
                    candidates=dict(candidates), candidate_confusion=dict(confusion),
-                   inspected_counts=dict(counts), rule_counts=dict(rule_counts), per_format=per_format, limit=limit,
+                   inspected_counts=dict(counts), rule_counts=dict(rule_counts), boundary_counts=dict(boundary_counts), evidence_counts=dict(evidence_counts), per_format=per_format, limit=limit,
                    selection='first matching rows; smoke test, not representative' if limit else 'all matching rows',
                    rejection_applied=False,
                    note='INVALID는 구조 후보의 규칙 위반 증거이며 블록 또는 FFC 후보 기각이 아님.')
@@ -126,7 +137,7 @@ def main():
     parser.add_argument('--meta', required=True)
     parser.add_argument('--predictions', required=True)
     parser.add_argument('--mode', choices=['prediction', 'ground-truth'], default='prediction', help='ground-truth는 정답 기반 진단 전용')
-    parser.add_argument('--validator-version', choices=['v1', 'v2'], default='v2')
+    parser.add_argument('--validator-version', choices=['v1', 'v2', 'v3'], default='v3')
     parser.add_argument('--limit', type=int, default=100, help='0이면 모든 PNG/ZIP 예측 후보 검사')
     parser.add_argument('--output', default=str(Path(__file__).resolve().parent / 'ffc-output' / datetime.now().strftime('%Y%m%d-%H%M%S-%f')))
     args = parser.parse_args()

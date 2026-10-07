@@ -16,7 +16,8 @@ class PipelineModeTests(unittest.TestCase):
         from demo import examples
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            data = examples()[0][2].ljust(512, b'\0')
+            # IHDR 뒤에 종료 청크를 붙인다. 0 패딩을 다음 청크로 해석하게 만들지 않는다.
+            data = (examples()[0][2] + b'\x00\x00\x00\x00IEND\xaeB`\x82').ljust(512, b'\0')
             x = np.array([list(data)] * 3, dtype=np.uint8)
             np.savez(root/'data.npz', x=x, y=np.array([16,59,16], dtype=np.uint8))
             metas = [dict(row=i, block_id=f'tess:{i}', source_file_id=f'file{i}', ground_truth_type=t, label=l)

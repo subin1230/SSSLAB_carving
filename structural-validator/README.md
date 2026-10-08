@@ -93,6 +93,20 @@ ZIP LOCAL_FIXED_FIELDS의 VALID는 필드 읽기 성공만 뜻하며 메타데�
 
 ### 예측·정답에 독립적인 전체 블록 탐색
 
+완료된 all-formats 실행은 다음 명령으로 구조와 원본 라벨의 차이를 조사한다.
+
+```sh
+python3 analyze_supported_structures.py --run /path/to/all-formats-run
+```
+
+summary가 참조하는 동일 NPZ를 읽고 경계 근거 반영 VALID가 있는 모든 블록을 분석한다.
+`structure-analysis/날짜/report.md`는 구조/정답별 블록 수·후보 종류·메타데이터 키워드·
+근거 있는 ZIP 후보의 파일명을 정리한다. `supported_details.jsonl`에는 해당 포맷의
+모든 후보와 PNG IHDR, 텍스트 키워드, ZIP 로컬/중앙 파일명, 블록 hex를 기록한다.
+텍스트 메타데이터는 완전한 청크에서만 추출하며 압축 메타데이터는 해제하지 않는다.
+라벨은 사후 그룹화에만 사용한다. 파일명·키워드는 원본 포맷의 확정 근거가 아니다.
+기존 탐색을 반복하거나 재분류하지 않는다.
+
 `--mode all-formats --validator-version v5 --limit 0`은 NPZ의 모든 블록에
 PNG와 ZIP 검사를 각각 적용한다. 정답·FFC 예측은 입력 대응 확인과 사후 집계에만
 사용하며 검사할 포맷 선택이나 바이트 탐색에는 사용하지 않는다.

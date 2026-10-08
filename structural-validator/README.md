@@ -272,3 +272,34 @@ NPZ/메타 row·label을 확인하고 선택 블록의 ID와 특징을 저장한
 출력은 FFC 조건부 제거율이 아니다. 원본 파일 중복은 선택 표본에서만 확인한다.
 이 실험은 구조 규칙을 보완할 데이터 기반 경로의 타당성 조사이며, 유효성이나
 성과를 보장하지 않는다. 기존 test는 사용하지 않는다.
+
+### 단일 블록 접근의 상한 점검 (블록 바이트를 읽지 않음)
+
+규칙을 더 추가하기 전에 두 가지를 먼저 확인한다.
+
+**1. FFC 오답이 같은 압축 계열 안의 혼동인가**
+
+```sh
+python3 confusion_families.py \
+  --predictions /home/yurim/ffc_results/B_fiftyRT_512/val_predictions.csv
+```
+
+PNG/ZIP으로 잘못 예측된 블록(`wrong_predicted_as`)과 놓친 정답 블록(`missed_truth`)의
+실제 포맷을 deflate / deflate_mixed / other_compressed 등 계열로 묶는다.
+deflate 비율이 높으면 구조 단서가 없는 블록 대부분은 같은 압축기 출력이므로
+단일 블록 구조 검증으로 구별할 정보가 거의 없다는 뜻이다(증명이 아닌 규모 추정).
+계열 정의는 `FAMILIES`의 가정이며, 미지정 포맷은 경고로 출력하므로 `--family-map`으로 보완한다.
+
+**2. 같은 파일의 연속 블록이 데이터셋에 있는가**
+
+```sh
+python3 count_adjacent_blocks.py --meta \
+  /home/yurim/tesserae_fifty/512_1/train_meta.csv \
+  /home/yurim/tesserae_fifty/512_1/val_meta.csv \
+  /home/yurim/tesserae_fifty/512_1/test_meta.csv
+```
+
+`source_file_id`와 `block_index_in_file`(없으면 `byte_offset`)로 split별 연속 쌍 수,
+이웃 블록이 있는 블록 비율, 첫 블록(헤더)을 가진 파일 수를 센다.
+연속 쌍이 거의 없으면 블록 쌍 실험은 원본 파일에서 쌍 데이터셋을 새로 만들어야 한다.
+`files_in_multiple_splits`가 0이 아니면 split이 파일 단위로 분리되지 않았으므로 별도 확인한다.

@@ -92,7 +92,7 @@ def collect(npz_path, meta_path, predictions_path, output, limit=100, version="v
             statuses = {r['status'] for r in results}
             for result in results:
                 rule_counts[f"{fmt} | {result['rule']} | {result['status']}"] += 1
-            if version in ('v3', 'v4'):
+            if version in ('v3', 'v4', 'v5'):
                 evidence_states = {r['evidence_status'] for r in results}
                 for r in results:
                     boundary_counts[f"{fmt} | {r['boundary_evidence']}"] += 1

@@ -27,7 +27,8 @@ def read_meta(paths, block_size):
     """(split, file_id, format, index) 목록. split 이름은 파일명에서 _meta 앞부분."""
     rows = []
     for path in paths:
-        split = Path(path).stem.removesuffix('_meta')
+        split = Path(path).stem
+        split = split[:-len('_meta')] if split.endswith('_meta') else split  # Python 3.8 이하 호환
         with open(path, newline='', encoding='utf-8-sig') as f:
             reader = csv.DictReader(f)
             if not {'source_file_id', 'ground_truth_type'}.issubset(reader.fieldnames or []):

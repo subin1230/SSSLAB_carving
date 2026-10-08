@@ -93,6 +93,22 @@ ZIP LOCAL_FIXED_FIELDS의 VALID는 필드 읽기 성공만 뜻하며 메타데�
 
 ### 예측·정답에 독립적인 전체 블록 탐색
 
+Android 리소스 단서의 탐색적 APK 후보 실험:
+
+```sh
+python3 evaluate_android_chunks.py --run /path/to/complete-all-formats-run
+```
+
+기존 run의 NPZ 전체를 다시 읽어 npTc/npOl/npLb를 라벨과 무관하게 탐색한다.
+완전한 청크 CRC 및 npOl=24/npLb=16 길이, npTc=32+4*(x/y/color 개수)의
+길이 관계를 만족한 고유 블록을 후보로 집계한다. 전체 Android 의미 검증은 아니다.
+원본 라벨별 후보 수·고유 원본 파일 수·APK 후보 정밀도·APK 적용 범위를 출력한다.
+FFC를 APK로 덮어쓸 경우의 회복/손실 수는 가상 집계이며 실제 재분류하지 않는다.
+val 관찰에서 선택한 규칙이므로 결과는 탐색적이며 독립 평가가 필요하다.
+Android 리소스는 다른 포맷 안에 포함될 수도 있어 APK 확정 근거가 아니다.
+근거: https://android.googlesource.com/platform/frameworks/base/+/master/tools/aapt/Images.cpp
+및 include/androidfw/ResourceTypes.h의 Res_png_9patch.
+
 완료된 all-formats 실행은 다음 명령으로 구조와 원본 라벨의 차이를 조사한다.
 
 ```sh

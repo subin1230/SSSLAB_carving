@@ -16,8 +16,10 @@ from validator_v1 import validate_block as validate_v1
 
 
 def collect(npz_path, meta_path, predictions_path, output, limit=100, version="v3", mode="prediction"):
-    if mode not in ("prediction", "ground-truth"):
+    if mode not in ("prediction", "ground-truth", "all-formats"):
         raise ValueError("알 수 없는 선택 모드")
+    if mode == 'all-formats' and version not in ('v3', 'v4', 'v5'):
+        raise ValueError('all-formats는 경계 근거를 제공하는 v3/v4/v5만 지원함')
     check = {"v1": validate_v1, "v2": validate_v2, "v3": validate_block, "v4": validate_v4, "v5": validate_v5}[version]
     if limit < 0:
         raise ValueError('limit은 0(전체) 또는 양수여야 합니다')
@@ -63,8 +65,8 @@ def collect(npz_path, meta_path, predictions_path, output, limit=100, version="v
             label_types[label] = truth
             predicted = pred['predicted_type'].lower()
             fmt = truth if mode == 'ground-truth' else predicted
-            if fmt in ('png', 'zip'):
-                candidates[fmt] += 1
+            if mode == 'all-formats' or fmt in ('png', 'zip'):
+                candidates['all' if mode == 'all-formats' else fmt] += 1
                 confusion[f'{truth} -> {predicted}'] += 1
                 if limit == 0 or len(selected) < limit:
                     selected.append((i, meta, pred))
@@ -75,6 +77,10 @@ def collect(npz_path, meta_path, predictions_path, output, limit=100, version="v
 
     output = Path(output)
     output.mkdir(parents=True, exist_ok=False)
+    if mode == 'all-formats':
+        from scan_all_formats import scan
+        return scan(x, selected, check, output, version, count, limit,
+                    npz_path, meta_path, predictions_path)
     counts = Counter()
     rule_counts = Counter()
     boundary_counts = Counter()
@@ -138,9 +144,9 @@ def main():
     parser.add_argument('--npz', required=True)
     parser.add_argument('--meta', required=True)
     parser.add_argument('--predictions', required=True)
-    parser.add_argument('--mode', choices=['prediction', 'ground-truth'], default='prediction', help='ground-truth는 정답 기반 진단 전용')
+    parser.add_argument('--mode', choices=['prediction', 'ground-truth', 'all-formats'], default='prediction', help='all-formats는 모든 블록에 PNG/ZIP을 독립 적용; ground-truth는 진단 전용')
     parser.add_argument('--validator-version', choices=['v1', 'v2', 'v3', 'v4', 'v5'], default='v3')
-    parser.add_argument('--limit', type=int, default=100, help='0이면 모든 PNG/ZIP 예측 후보 검사')
+    parser.add_argument('--limit', type=int, default=100, help='0이면 전체; all-formats에서는 블록 수 제한')
     parser.add_argument('--output', default=str(Path(__file__).resolve().parent / 'ffc-output' / datetime.now().strftime('%Y%m%d-%H%M%S-%f')))
     args = parser.parse_args()
     collect(args.npz, args.meta, args.predictions, args.output, args.limit, args.validator_version, args.mode)

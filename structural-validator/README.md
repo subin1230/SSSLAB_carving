@@ -91,6 +91,26 @@ ZIP LOCAL_FIXED_FIELDS의 VALID는 필드 읽기 성공만 뜻하며 메타데�
 
 ## FFC 예측 연동
 
+### 예측·정답에 독립적인 전체 블록 탐색
+
+`--mode all-formats --validator-version v5 --limit 0`은 NPZ의 모든 블록에
+PNG와 ZIP 검사를 각각 적용한다. 정답·FFC 예측은 입력 대응 확인과 사후 집계에만
+사용하며 검사할 포맷 선택이나 바이트 탐색에는 사용하지 않는다.
+`--limit 100`은 전체 행 중 앞의 100블록 연결 확인용이다.
+기존 prediction/ground-truth 모드와 기본값은 유지한다.
+
+- blocks.csv: 검사한 모든 블록의 후보 포맷·근거 반영 VALID 포맷·정답·예측.
+- evidence.jsonl: 어느 포맷이든 구조 후보가 발견된 블록만 상세 저장한다.
+  두 포맷 결과를 함께 기록하며 기존 audit_clues.py 입력 형식과 다르다.
+- summary.json: none/png/zip/png+zip 후보 범주와 근거 범주를 별도로 집계한다.
+  per_truth_label에서 라벨별 적용 범위를 확인한다.
+- supported는 경계 근거 반영 VALID 규칙이 하나 이상이라는 뜻이다.
+  파일 전체 형식 확정이 아니며 INVALID 동시 존재도 배제하지 않는다.
+  잘못된 FFC 예측에서 정답 포맷 근거가 발견된 수와, 예측과 다른 근거가
+  발견된 수를 구분한다. 둘 모두 재분류 성공 수가 아니다.
+- 자동 기각·재분류는 수행하지 않는다. PNG/ZIP 구조 탐색이며 전체 클래스 분류기가 아니다.
+  모든 바이트를 두 번 검사하므로 기존 후보 선택 모드보다 시간이 더 걸릴 수 있다.
+
 `ffc_pipeline.py`에는 NumPy가 필요합니다. 원본 입력 파일은 읽기만 하며 결과는 기본적으로 이 코드 폴더의 `ffc-output/실행시간/`에 저장합니다.
 
 ```sh

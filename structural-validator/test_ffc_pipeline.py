@@ -53,6 +53,16 @@ class PipelineModeTests(unittest.TestCase):
             self.assertTrue(v5['evidence_counts'])
             self.assertEqual(v5['inspected_counts']['boundary_supported_invalid_blocks'], 0)
             self.assertEqual(v5['evidence_counts'], v4['evidence_counts'])
+            all_formats = collect(root/'data.npz',root/'meta.csv',root/'pred.csv',root/'all',0,'v5','all-formats')
+            self.assertEqual(all_formats['inspected_counts']['inspected'], 3)
+            self.assertEqual(all_formats['candidate_categories'], {'png': 3})
+            self.assertEqual(all_formats['supported_categories'], {'png': 3})
+            self.assertEqual(all_formats['per_truth_label']['json']['png_supported_blocks'], 1)
+            self.assertFalse(all_formats['uses_ground_truth_for_validation'])
+            self.assertFalse(all_formats['uses_prediction_for_validation'])
+            self.assertFalse(all_formats['reclassification_applied'])
+            smoke = collect(root/'data.npz',root/'meta.csv',root/'pred.csv',root/'all-smoke',1,'v5','all-formats')
+            self.assertEqual(smoke['inspected_counts']['inspected'], 1)
             # ID mismatch must still stop diagnostic mode before output creation.
             preds[0]['block_id']='wrong'
             with (root/'pred.csv').open('w',newline='') as f:

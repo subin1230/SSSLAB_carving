@@ -386,3 +386,56 @@ ZIP64·멀티디스크·암호화·data descriptor 등은 현재 지원 범위 �
 출력 디렉터리와 평가 파일은 덮어쓰지 않는다. 아직 가중치를 정하거나 Leiden에
 관계를 추가하지 않으며, 이 결과로 후보 모호성과 오연결부터 확인한다. 50개 파일의
 편의 표본 결과를 일반화하지 말고 규칙을 고정한 뒤 별도 파일에서 평가해야 한다.
+
+### ZIP 쌍의 실제 데이터 검사: 압축 해제·크기·CRC
+
+`zip_pair_payload.py`는 Same-File 모델 없이 기존 ZIP 연결 후보를 더 검사한다.
+`zip_next`가 바로 다음 512바이트 블록을 가리키고, 로컬 헤더가 선언한 항목 데이터
+전체가 두 블록에 들어 있을 때만 실행한다. 후보 두 블록을 가정한 순서로 이어서
+stored 데이터 또는 raw Deflate 스트림을 읽고, 비압축 크기와 계산한 CRC32를 확인한다.
+CRC 필드끼리 비교하는 기존 `cd_local`과 달리 실제 내용으로 CRC를 계산한다.
+
+```sh
+python3 zip_pair_payload.py check \
+  --blocks /path/to/pilot/blocks.npy \
+  --candidates /path/to/pilot/pair-candidates-v1 \
+  --output /path/to/pilot/payload-v1
+python3 zip_pair_payload.py evaluate \
+  --blocks /path/to/pilot/blocks.npy \
+  --truth /path/to/pilot/truth.csv \
+  --run /path/to/pilot/payload-v1
+```
+
+검사는 정답을 읽지 않는다. 중간 블록이 빠진 관계는 임의로 이어 붙이지 않고 UNKNOWN으로
+남긴다. data descriptor, 암호화·미지원 플래그, ZIP64 등의 조건도 UNKNOWN이다.
+데이터가 출발 블록 안에서 이미 끝나면 CRC 통과가 대상 블록을 지지하지 않으므로
+UNKNOWN으로 남긴다. 비압축 데이터가 빈 경우에도 같은 원칙으로 통과 근거를 만들지 않는다.
+출력 크기는 기본 8MiB로 제한하며, 자원 제한을 넘는 선언은 구조 위반으로 해석하지 않는다.
+
+| 결과 | 의미 |
+|---|---|
+| PASS | 대상 블록의 데이터를 포함한 완전한 항목의 압축 해석·크기·CRC가 일치함 |
+| FAIL | 로컬 헤더와 해당 연결 순서를 가정했을 때 데이터 해석·크기·CRC에 모순이 있음 |
+| UNKNOWN | 완전한 데이터가 없거나 지원 범위·자원 범위 밖이거나 대상 블록을 검증하지 못함 |
+
+세 결과 모두 파일 정체성을 확정하지 않는다. 같은 내용이 다른 원본 파일에 복사되어
+있으면 서로 다른 파일의 연결도 PASS할 수 있다. FAIL은 **이 항목의 재구성 가설**에
+대한 결과이며 두 블록이 같은 파일일 수 없다는 negative edge로 사용하지 않는다.
+인식한 로컬 헤더 자체가 잘못된 가설인 경우도 있으므로 정답 연결 손실을 함께 평가한다.
+
+동일한 원래 질의 집합에 대해 아래 세 후보 집합을 저장하고, 별도 평가에서 비교한다.
+
+- `baseline`: 기존 연결 후보 전부.
+- `keep_not_failed`: FAIL만 제외하고 PASS·UNKNOWN은 유지.
+- `payload_passed`: PASS만 선택한 제한된 근거 집합. 다른 관계의 거짓을 의미하지 않음.
+
+`payload_summary.json`은 적용 범위와 PASS/FAIL/UNKNOWN 원인을, `payload_evidence.jsonl`은
+관계별 검사 근거를 저장한다. `comparison.json`에는 세 집합의 정밀도·조건부 대상 포함률·
+고유 쌍 수와, FAIL로 제외된 **정확한 대상 관계 수** 및 **다른 파일 관계 수**가 기록된다.
+통과 집합의 정밀도만 보지 말고 적용 건수, 정답 연결 손실, 같은 파일의 다른 위치 관계도
+함께 확인한다. 입력 바이트와 저장된 후보 파일의 해시를 확인하고 기존 결과는 덮어쓰지 않는다.
+아직 서버 파일럿의 개선 효과는 실행 전이며 생성 ZIP으로 로직만 검증했다.
+
+CRC·ZIP 데이터 필드는 [PKWARE APPNOTE](https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT),
+raw Deflate의 종료·잔여 데이터 확인은 [Python zlib 문서](https://docs.python.org/3/library/zlib.html)를
+참조한다. 원래 구조를 확인할 데이터가 확보된 쌍에 대한 추가 검사이며 전체 ZIP 복구기는 아니다.

@@ -558,6 +558,41 @@ linear가 아니면 중단하여 sigmoid 중복 적용을 막는다.
 로컬 테스트에는 TensorFlow와 실제 모델 파일이 없어 특징 결합·수치 변환·쌍 열거·
 입출력·중복 진단을 검증했다. 실제 모델 로딩과 임베딩 재현 여부는 서버 실행으로 확인한다.
 
+**임베딩 재현 검사에서 중단될 때**
+
+`max absolute difference` 하나만으로 모델 불일치나 무해한 수치 오차를 확정하지 않는다.
+`atol=rtol=1e-4`는 현재 호환성 검사 기준이며 데이터로 검증된 점수 허용오차는 아니다.
+나린님이 제공한 추출 코드에는 GPU 0과 배치 4096이 지정되어 있고, 현재 추론기는 CPU를
+사용한다. 환경·배치·모델·전처리 차이를 구분하기 위해 아래 진단을 실행한다.
+
+```sh
+python diagnose_samefile_reference.py \
+  --encoder-model /home/narin/fifty/fifty/utilities/models/512_1.h5 \
+  --pair-model /home/narin/samefile_v7/main_results/v7_mlp_seed42.keras \
+  --reference-blocks /home/narin/samefile_v7/v7_raw_blocks_final.npy \
+  --reference-embeddings /home/narin/samefile_v7/v7_embeddings.npy \
+  --reference-manifest /home/narin/samefile_v7/v7_embedding_manifest.json \
+  --output /path/to/pilot/reference-diagnosis-ffc
+```
+
+`diagnosis.json`과 `embedding_samples.npz`를 새 디렉터리에 저장한다.
+기존 검사와 같은 최대 16행만 사용하며, 원본 배열·모델은 변경하지 않는다.
+
+- 참조 임베딩의 값 범위, 절대 오차, 허용오차 초과 원소·행 수, 상대 L2 오차와
+  코사인 유사도, 실패가 큰 좌표를 기록한다. 0 벡터의 상대값은 `null`이다.
+- 같은 배치 재실행과 한 행씩 실행을 비교해 반복·배치 변화의 영향을 분리한다.
+- 저장된 임베딩과 재계산한 임베딩으로 각각 같은 MLP를 실행하여 최대 120쌍의
+  logit·sigmoid 점수 차이를 기록한다. 이 쌍에는 정답이 없으므로 정확도 검사가 아니다.
+  0.5 경계 변화도 수치 진단용이며 grouping 임계값을 선택하지 않는다.
+- Python·TF·Keras·NumPy, CPU 설정, oneDNN 환경 변수, 모델·표본 해시와
+  제공된 원본 manifest를 기록한다. oneDNN 변수 미설정은 비활성화라는 뜻이 아니다.
+
+진단은 불일치가 있어도 보고서를 저장하며 **점수 생성의 통과 기준을 완화하지 않는다**.
+보고서 생성 성공은 모델 재현 성공과 다르다. 환경을 비교할 때 같은 명령을 나린님
+기존 Python 환경에서도 실행하되 다른 출력 디렉터리를 사용한다. 환경 변경은
+설치나 재학습 없이 별도 프로세스에서 수행하며, GPU는 자동으로 사용하지 않는다.
+파일럿 전체 Same-File 점수는 기존 재현 검사 통과 후 별도로 생성한다.
+
 1,600블록의 순서 없는 모든 쌍 **1,279,200개**를 배치로 계산한다. 정답 포맷으로
 쌍을 걸러내지 않으므로 서로 다른 포맷의 쌍도 포함한다. V7은 같은 포맷 안의 다른 파일을
 음성으로 학습했으므로 포맷 간 점수는 학습 조건 밖의 탐색 결과이다. 실제 동일 포맷

@@ -21,6 +21,8 @@ from zip_pair_payload import file_hash
 
 HIDDEN_LAYER = 'leaky_re_lu_2'
 HIDDEN_DIM = 256
+REFERENCE_ATOL = 1e-4
+REFERENCE_RTOL = 1e-4
 
 
 def pair_features(h1, h2):
@@ -74,24 +76,31 @@ def extract_embeddings(x, predict, batch_size):
     return out
 
 
-def verify_reference(block_path, embedding_path, predict):
+def reference_sample(block_path, embedding_path):
     raw = load_blocks(block_path)
     expected = np.load(embedding_path, mmap_mode='r', allow_pickle=False)
     if len(raw) == 0 or expected.shape != (len(raw), HIDDEN_DIM) or expected.dtype != np.float32:
         raise ValueError('invalid reference embedding shape/dtype')
     rows = np.unique(np.linspace(0, len(raw)-1, min(16, len(raw)), dtype=np.int64))
     batch = np.asarray(raw[rows])
-    actual = extract_embeddings(batch, predict, len(rows))
     reference = np.asarray(expected[rows])
     if not np.isfinite(reference).all():
         raise ValueError('nonfinite saved reference embeddings')
+    metadata = dict(raw_path=str(block_path), embedding_path=str(embedding_path), rows=rows.tolist(),
+                    raw_shape=list(raw.shape), embedding_shape=list(expected.shape),
+                    raw_sample_sha256=hashlib.sha256(batch.tobytes()).hexdigest(),
+                    embedding_sample_sha256=hashlib.sha256(reference.tobytes()).hexdigest())
+    return batch, reference, metadata
+
+
+def verify_reference(block_path, embedding_path, predict):
+    batch, reference, metadata = reference_sample(block_path, embedding_path)
+    actual = extract_embeddings(batch, predict, len(batch))
     difference = float(np.max(np.abs(actual-reference)))
-    if not np.allclose(actual, reference, atol=1e-4, rtol=1e-4):
-        raise ValueError(f'reference embeddings do not reproduce (max absolute difference={difference}); check encoder, layer, preprocessing and TensorFlow environment')
-    return dict(raw_path=str(block_path), embedding_path=str(embedding_path), rows=rows.tolist(),
-                matched=True, atol=1e-4, rtol=1e-4, max_absolute_difference=difference,
-                raw_sample_sha256=hashlib.sha256(batch.tobytes()).hexdigest(),
-                embedding_sample_sha256=hashlib.sha256(reference.tobytes()).hexdigest())
+    if not np.allclose(actual, reference, atol=REFERENCE_ATOL, rtol=REFERENCE_RTOL):
+        raise ValueError(f'reference embeddings do not reproduce (max absolute difference={difference}); check encoder, layer, preprocessing and TensorFlow environment. Run diagnose_samefile_reference.py for details; scoring was not started.')
+    return dict(metadata, matched=True, atol=REFERENCE_ATOL, rtol=REFERENCE_RTOL,
+                max_absolute_difference=difference)
 
 
 def write_scores(x, embeddings, predict, output, batch_size, provenance):
@@ -157,15 +166,10 @@ def environment():
             print(path)
 
 
-def score(args):
-    output = Path(args.output)
-    if output.exists():
-        raise FileExistsError('output exists; choose a new output directory')
-    if args.batch_size < 1 or args.threads < 1:
-        raise ValueError('batch size and threads must be positive')
-    x = load_blocks(args.blocks)
-    if len(x) < 2:
-        raise ValueError('requires at least two blocks')
+def load_models_cpu(args):
+    """Shared inference setup for strict scoring and read-only diagnostics."""
+    if args.threads < 1:
+        raise ValueError('threads must be positive')
     if importlib.util.find_spec('tensorflow') is None:
         raise SystemExit('현재 Python에 TensorFlow가 없음. 먼저 python3 score_samefile_pilot.py environment 결과를 확인하세요. 데이터/모델은 변경하지 않았습니다.')
     # CPU default for shared-server inference. Do not reserve someone else's GPU.
@@ -188,18 +192,35 @@ def score(args):
     activation = tf.keras.activations.serialize(head.layers[-1].activation)
     if activation != 'linear':
         raise ValueError('expected V7 main MLP linear logit output; refusing a second sigmoid')
+    provenance = dict(
+        python=sys.executable, python_version=sys.version.split()[0],
+        tensorflow=tf.__version__, keras=getattr(tf.keras, '__version__', None),
+        numpy=np.__version__, device='CPU', intra_op_threads=args.threads,
+        onednn_environment=os.environ.get('TF_ENABLE_ONEDNN_OPTS', 'unset'),
+        tensorflow_build=tf.sysconfig.get_build_info(),
+        visible_devices=[d.name for d in tf.config.get_visible_devices()],
+        encoder_model=str(Path(args.encoder_model).resolve()), encoder_model_sha256=encoder_hash,
+        pair_model=str(Path(args.pair_model).resolve()), pair_model_sha256=pair_hash,
+    )
+    return encoder, head, provenance
+
+
+def score(args):
+    output = Path(args.output)
+    if output.exists():
+        raise FileExistsError('output exists; choose a new output directory')
+    if args.batch_size < 1:
+        raise ValueError('batch size must be positive')
+    x = load_blocks(args.blocks)
+    if len(x) < 2:
+        raise ValueError('requires at least two blocks')
+    encoder, head, provenance = load_models_cpu(args)
     print('[기존 임베딩 재현 검사]', flush=True)
     reference = verify_reference(args.reference_blocks, args.reference_embeddings, encoder.predict_on_batch)
     print(json.dumps(reference, indent=2), flush=True)
     print(f'[우리 블록 {len(x):,}개 임베딩 추출]', flush=True)
     embeddings = extract_embeddings(x, encoder.predict_on_batch, args.batch_size)
-    provenance = dict(
-        python=sys.executable, tensorflow=tf.__version__, numpy=np.__version__, device='CPU',
-        intra_op_threads=args.threads, batch_size=args.batch_size,
-        encoder_model=str(Path(args.encoder_model).resolve()), encoder_model_sha256=encoder_hash,
-        pair_model=str(Path(args.pair_model).resolve()), pair_model_sha256=pair_hash,
-        reference_verification=reference,
-    )
+    provenance.update(batch_size=args.batch_size, reference_verification=reference)
     return write_scores(x, embeddings, head.predict_on_batch, output, args.batch_size, provenance)
 
 

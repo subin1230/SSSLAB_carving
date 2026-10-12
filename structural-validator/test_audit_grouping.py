@@ -80,6 +80,30 @@ class GroupingAuditTests(unittest.TestCase):
 
 @unittest.skipUnless(READY,'requires requirements-grouping.txt environment')
 class GroupingAuditIntegrationTests(unittest.TestCase):
+    def test_mutual_run_replays_with_its_selector_and_no_block_dropping(self):
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(tmp)
+            x = fixture(root)
+            args = arguments(root)
+            args.routing = 'oracle-format'
+            args.knn_mode = 'mutual'
+            args.threshold = .1  # Fixture's tied scores exceed this threshold.
+            result = run(args)
+            base = next(r for r in result['records'] if r['cohort']=='all_pilot' and r['variant']=='samefile')
+            self.assertEqual(base['graph']['edges'], 1)
+            self.assertEqual(base['graph']['isolated_nodes'], len(x)-2)
+            self.assertEqual(base['evaluation']['all_blocks']['blocks'], len(x))
+            audit_result = audit(root/'blocks.npy',root/'truth.csv',root/'comparison',root/'audit')
+            self.assertEqual(audit_result['knn_mode'], 'mutual')
+            self.assertIn('고립 블록', (root/'comparison/report.md').read_text())
+            self.assertIn('**mutual kNN**', (root/'comparison/report.md').read_text())
+            # Without selector provenance, replay must catch the different edges.
+            path = root/'comparison/comparison.json'
+            result['parameters'].pop('knn_mode')
+            path.write_text(json.dumps(result))
+            with self.assertRaises(ValueError):
+                audit(root/'blocks.npy',root/'truth.csv',root/'comparison',root/'invalid-audit')
+
     def test_original_run_without_routing_fields_still_audits(self):
         with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
             root = Path(tmp)
@@ -89,6 +113,7 @@ class GroupingAuditIntegrationTests(unittest.TestCase):
             saved = json.loads(path.read_text())
             del saved['routing']
             del saved['parameters']['routing']
+            del saved['parameters']['knn_mode']
             path.write_text(json.dumps(saved))
             result = audit(root/'blocks.npy',root/'truth.csv',root/'comparison',root/'audit')
             self.assertFalse(result['routing']['ground_truth_format_used'])

@@ -206,6 +206,7 @@ def render(report):
         return '—' if x is None else f'{x:.4f}'
     lines = ['# Grouping 원인 진단', '',
              '저장된 점수·그래프·그룹의 사후 정답 분석임. 추론·clustering·설정 변경 없음.', '']
+    lines += [f'원 실행의 기본 연결 선택: {report.get("knn_mode", "union")} kNN.', '']
     oracle = report.get('routing', {}).get('ground_truth_format_used', False)
     if oracle:
         lines += ['**원 실행은 정답 포맷으로 연결 후보를 제한한 oracle 진단임. 실제 FFC 성능이 아님.**',
@@ -285,7 +286,8 @@ def audit(blocks, truth_path, run, output):
         raise ValueError('routing metadata does not reproduce')
     if oracle and 'routing' not in comparison:
         raise ValueError('oracle run requires routing metadata')
-    graphs = build_graphs(scores, passed, p['k'], p['threshold'], p['zip_alpha'], route_labels)
+    knn_mode = p.get('knn_mode', 'union')
+    graphs = build_graphs(scores, passed, p['k'], p['threshold'], p['zip_alpha'], route_labels, knn_mode)
     check_saved_graph(run, scores, passed, graphs)
     # File-format disagreement would make relation buckets ambiguous.
     file_formats = defaultdict(set)
@@ -305,7 +307,7 @@ def audit(blocks, truth_path, run, output):
     report = dict(audit='grouping-diagnostics-v1', comparison_path=str(run/'comparison.json'),
                   comparison_sha256=file_hash(run/'comparison.json'), blocks_sha256=fingerprint(x),
                   truth_sha256=file_hash(truth_path), truth_used=True, inference_performed=False,
-                  input_results_modified=False, routing=routing_info, cohorts={})
+                  input_results_modified=False, routing=routing_info, knn_mode=knn_mode, cohorts={})
     clusters, files, zip_rows = [], [], []
     for name, ids in cohorts.items():
         print(f'점수·연결·그룹 진단: {name}', flush=True)

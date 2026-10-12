@@ -162,12 +162,14 @@ def prepare_routing(mode, formats, passed, n):
         leiden_scope='one graph; same global resolution/normalization, not separate per-format runs')
 
 
-def build_graphs(scores, passed, k, threshold, alpha, route_labels=None):
-    """Symmetric union kNN baseline; add/boost each unique PASS pair once."""
+def build_graphs(scores, passed, k, threshold, alpha, route_labels=None, knn_mode='union'):
+    """Union or mutual kNN baseline; add/boost each unique PASS pair once."""
     n = len(scores)
-    if k < 1 or not 0 <= threshold <= 1 or not 0 <= alpha <= 1:
+    if (k < 1 or not 0 <= threshold <= 1 or not 0 <= alpha <= 1
+            or knn_mode not in ('union', 'mutual')):
         raise ValueError('invalid graph parameters')
     baseline = {}
+    selections = Counter()
     for i in range(n):
         js = np.flatnonzero((scores[i] >= threshold) & (scores[i] > 0))
         js = js[js != i]
@@ -176,7 +178,11 @@ def build_graphs(scores, passed, k, threshold, alpha, route_labels=None):
         # Stable secondary key for exact ties, independent of true source order.
         js = js[np.lexsort((js, -scores[i, js]))[:k]]
         for j in js:
-            baseline[tuple(sorted((i, int(j))))] = float(scores[i, j])
+            pair = tuple(sorted((i, int(j))))
+            baseline[pair] = float(scores[i, j])
+            selections[pair] += 1
+    if knn_mode == 'mutual':
+        baseline = {p: w for p, w in baseline.items() if selections[p] == 2}
     augmented = dict(baseline)
     if alpha:  # alpha=0 is an exact no-op, including edge selection.
         for i, j in sorted(passed):
@@ -256,6 +262,15 @@ def evaluate_memberships(truth, labels, touched):
                                                        for k in all_counts}))
 
 
+def evaluate_edges(ids, edges, true_labels):
+    """Post-hoc edge purity; these labels never affect graph construction."""
+    included = set(map(int, ids))
+    pairs = [(i, j) for i, j in edges if i in included and j in included]
+    same = sum(true_labels[i] == true_labels[j] for i, j in pairs)
+    return dict(same_file_edges=int(same), different_file_edges=len(pairs)-int(same),
+                same_file_precision=float(same/len(pairs)) if pairs else None)
+
+
 def unseen_ids(truth, truth_path, x, overlap):
     """Predetermined evaluation-cohort selection, never graph edge generation."""
     overlap = Path(overlap)
@@ -322,6 +337,10 @@ def write_report(path, result):
              '아래 값은 seed별 결과의 평균임. 차이는 ZIP 보완 − Same-File임.', '',
              '| 대상 | 지표 | Same-File | + ZIP | 차이 |',
              '|---|---|---:|---:|---:|']
+    mode = result['parameters'].get('knn_mode', 'union')
+    lines[2:2] = [f'기본 연결 선택: **{mode} kNN**. ' +
+                  ('두 블록이 서로를 상위 k개로 선택해야 연결함.' if mode == 'mutual'
+                   else '한쪽 이상이 상대를 상위 k개로 선택하면 연결함.'), '']
     oracle = result.get('graph_truth_used', False)
     if oracle:
         r = result['routing']
@@ -340,6 +359,19 @@ def write_report(path, result):
             r = s['all_blocks'][key]
             vals = [r[v]['mean'] for v in (*VARIANTS, 'paired_delta_zip_minus_samefile')]
             lines.append(f'| {cohort} | {key} | ' + ' | '.join(map(number, vals)) + ' |')
+    if all('graph_evaluation' in r for r in result['records']):
+        lines += ['', '| 대상 | 방식 | 연결 수 | 같은 파일 연결 비율 | 고립 블록 수 |',
+                  '|---|---|---:|---:|---:|']
+        seen = set()
+        for r in result['records']:
+            key = (r['cohort'], r['variant'])
+            if key in seen:
+                continue
+            seen.add(key)
+            precision = r['graph_evaluation']['same_file_precision']
+            value = '—' if precision is None else f'{precision:.2%}'
+            lines.append(f'| {key[0]} | {key[1]} | {r["graph"]["edges"]} | '
+                         f'{value} | {r["graph"]["isolated_nodes"]} |')
     lines += ['', '- ARI·NMI는 높을수록 좋음. over-merge·over-split 비율은 낮을수록 좋음.',
               '- over-merge = 서로 다른 파일인데 함께 묶인 쌍 / 함께 묶인 모든 쌍.',
               '- over-split = 같은 파일인데 나뉜 쌍 / 실제 같은 파일의 모든 쌍.',
@@ -378,10 +410,12 @@ def run(args):
         truth, _ = read_truth(args.truth, len(x))
     route_labels, passed, routing_info = prepare_routing(
         routing, [r['format'] for r in truth] if truth is not None else None, passed, len(x))
-    graphs = build_graphs(scores, passed, args.k, args.threshold, args.zip_alpha, route_labels)
+    knn_mode = getattr(args, 'knn_mode', 'union')
+    graphs = build_graphs(scores, passed, args.k, args.threshold, args.zip_alpha, route_labels, knn_mode)
     parameters = dict(k=args.k, threshold=args.threshold, zip_alpha=args.zip_alpha,
                       resolution=args.resolution, seeds=args.seeds,
-                      graph='undirected union kNN after score threshold; ties by sample_id',
+                      knn_mode=knn_mode,
+                      graph=f'undirected {knn_mode} kNN after score threshold; ties by sample_id',
                       zip_weight='s + alpha * (1-s); add PASS pairs outside kNN; unique pair once',
                       alpha_zero='exact baseline including topology',
                       leiden_partition='RBConfigurationVertexPartition', n_iterations=-1,
@@ -430,6 +464,7 @@ def run(args):
         def evaluate(inferred, ids):
             for record, labels, touched in inferred:
                 record['evaluation'] = evaluate_memberships(true_labels[ids], labels, touched)
+                record['graph_evaluation'] = evaluate_edges(ids, graphs[record['variant']], true_labels)
                 records.append(record)
 
         evaluate(full, all_ids)
@@ -464,7 +499,7 @@ def run(args):
                       records=records, aggregate=summarize(records),
                       graph_edges_sha256=file_hash(output / 'graph_edges.csv'),
                       memberships_sha256=file_hash(output / 'memberships.csv'),
-                      note='Exploratory convenience pilot, not held-out general performance. No parameter/seed selected by these labels; no automatic claims of improvement.')
+                      note='Exploratory convenience pilot, not held-out general performance. Design may be informed by earlier pilot diagnostics. Settings fixed for this run; all seeds reported, no automatic claims of improvement.')
         dump(output / 'comparison.json', result)
         write_report(output / 'report.md', result)
         dump(output / 'run_state.json', dict(status='complete', partitions=len(records)))
@@ -486,6 +521,8 @@ def main():
     r.add_argument('--overlap', help='existing samefile-v7-overlap audit; optional separate cohort')
     r.add_argument('--routing', choices=('all-pairs', 'oracle-format'), default='all-pairs',
                    help='oracle-format uses TRUE formats for a diagnostic, NOT actual FFC routing')
+    r.add_argument('--knn-mode', choices=('union', 'mutual'), default='union',
+                   help='mutual requires reciprocal top-k selection for baseline edges only')
     r.add_argument('--k', type=int, default=15)
     r.add_argument('--threshold', type=float, default=0.5)
     r.add_argument('--zip-alpha', type=float, default=0.5)

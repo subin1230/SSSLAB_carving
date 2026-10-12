@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from compare_samefile_grouping import (build_graphs, cluster, environment, evaluate_memberships,
+from compare_samefile_grouping import (build_graphs, cluster, environment, evaluate_edges, evaluate_memberships,
                                       load_scores, load_zip_pairs, metrics, pair_counts, prepare_routing, run)
 from score_samefile_pilot import write_scores
 from test_score_samefile_pilot import dummy_encoder
@@ -56,6 +56,35 @@ def arguments(root, name='comparison', overlap=True):
 
 
 class GraphConstructionTests(unittest.TestCase):
+    def test_mutual_rejects_one_way_selection_but_zip_can_add_it(self):
+        s = np.array([[0,.9,.8,0], [.9,0,.95,0], [.8,.95,0,0], [0,0,0,0]])
+        union = build_graphs(s, {(0,1)}, 1, .5, .5)
+        mutual = build_graphs(s, {(0,1)}, 1, .5, .5, knn_mode='mutual')
+        self.assertEqual(union['samefile'], {(0,1):.9, (1,2):.95})
+        self.assertEqual(mutual['samefile'], {(1,2):.95})
+        self.assertAlmostEqual(mutual['samefile_zip'][0,1], .95)
+        self.assertEqual(mutual['samefile_zip'][1,2], .95)
+        zero = build_graphs(s, {(0,1)}, 1, .5, 0, knn_mode='mutual')
+        self.assertEqual(zero['samefile'], zero['samefile_zip'])
+        # Restriction is before neighbour selection; ZIP cannot cross a route.
+        routed = build_graphs(s, {(1,2)}, 1, .5, .5,
+                             np.array(['jar','jar','apk','docx']), 'mutual')
+        self.assertEqual(routed['samefile'], {(0,1):.9})
+        self.assertEqual(routed['samefile'], routed['samefile_zip'])
+
+    def test_mutual_ties_and_edge_evaluation_keep_isolated_nodes_in_scope(self):
+        s = np.ones((4,4)) - np.eye(4)
+        r = build_graphs(s, set(), 1, .5, .5, knn_mode='mutual')
+        self.assertEqual(r['samefile'], {(0,1):1.})
+        truth = np.array(['a','a','b','c'])
+        quality = evaluate_edges(np.arange(4), r['samefile'], truth)
+        self.assertEqual(quality, dict(same_file_edges=1, different_file_edges=0, same_file_precision=1.))
+        # No edges in the induced cohort means undefined purity, not 100% or 0%.
+        quality = evaluate_edges(np.array([0,2,3]), r['samefile'], truth)
+        self.assertIsNone(quality['same_file_precision'])
+        with self.assertRaises(ValueError):
+            build_graphs(s, set(), 1, .5, .5, knn_mode='invalid')
+
     def test_format_restriction_precedes_topk_and_applies_to_zip_too(self):
         s = np.array([[0,.7,.99,.98], [.7,0,.97,.96],
                       [.99,.97,0,.8], [.98,.96,.8,0]])

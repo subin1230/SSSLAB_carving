@@ -886,3 +886,52 @@ oracle에서도 같은 포맷의 잘못된 연결과 오병합이 많으면 라�
 oracle에서 개선되면 이후 **이 1,600블록에 대한 실제 FFC 예측**으로 같은 비교를 수행해야 한다.
 이전 696,320행 test 예측 CSV는 입력 블록 집합이 다르므로 그대로 사용할 수 없다.
 현재 파일럿으로 설정을 고른 뒤에는 겹치지 않는 원본 파일에서 설정을 고정하여 평가한다.
+
+### 후속 비교: 서로를 선택하는 기본 연결만 유지
+
+oracle-format 진단에서도 union kNN baseline 17,143개 연결 중 같은 파일 연결은
+3,016개(17.59%)였다. ZIP 추가 연결 161개 중 160개는 같은 파일이었지만, 전체 grouping은
+일관되게 개선되지 않았다. 모델 메타 미관측 40파일에서는 추가 연결 127개가 모두 같은
+파일 연결임에도 최종 partition에 새로운 다른 파일 병합 1,727쌍(seed 평균)이 생겼다.
+직접 엣지의 정확성과 최종 그룹의 정확성을 분리해 봐야 한다. 특정 엣지 하나의 인과 효과를
+입증한 것은 아니다.
+
+이 진단을 바탕으로 **연결 선택 방식 하나만 바꾸는 탐색 비교**를 수행한다.
+`--knn-mode mutual`은 A가 B를 선택하고 B도 A를 선택했을 때만 기본 연결을 유지한다.
+기존 기본값 `union`은 어느 한쪽만 선택해도 연결한다. 이는 Same-File 점수의 재학습이나
+확률 보정이 아니며, 양쪽 선택이 실제 같은 파일임을 보장하지도 않는다.
+
+- 점수, 입력 블록, oracle 포맷 제한, k=15, threshold=0.5, ZIP alpha=0.5,
+  Leiden resolution=1.0, seed 0~4는 직전 비교와 동일하게 고정한다.
+- 두 조건 모두 mutual baseline을 쓰고, ZIP 보완 조건에만 기존 PASS 쌍을 추가/보강한다.
+  ZIP PASS는 mutual에서 빠졌어도 같은 포맷이면 추가할 수 있다. FAIL은 음성 제약으로 쓰지 않는다.
+- 남은 연결 수, 같은 파일 연결 비율, **고립 블록 수**를 비교 보고서에 함께 출력한다.
+  연결을 줄이면서 맞는 연결도 잃을 수 있으므로 ARI/NMI·오병합·과분리를 모두 평가한다.
+  고립된 블록도 평가에서 빼지 않고 singleton 그룹으로 유지한다.
+- 40파일 cohort는 기존과 같은 유도 그래프다. cohort 내부에서 top-k를 새로 채우지 않는다.
+- 개선 여부는 서버 실행 후 확인한다. 이 파일럿의 정답 분석으로 설계한 탐색이므로,
+  유리한 결과가 나오더라도 새 파일 표본의 고정 조건 평가를 대신하지 않는다.
+  oracle 라우팅을 계속 사용하므로 실제 FFC 라우팅 성능으로 주장하지 않는다.
+
+```sh
+cd /home/subin/SSSLAB_carving
+git pull --ff-only
+cd structural-validator
+ZIP_PILOT_DIR="/home/subin/SSSLAB_carving/structural-validator/pair-pilot-output/20261012-094851-577470"
+
+/home/subin/venvs/zip-grouping/bin/python compare_samefile_grouping.py run \
+  --blocks "$ZIP_PILOT_DIR/blocks.npy" \
+  --scores "$ZIP_PILOT_DIR/samefile-v7-seed42" \
+  --payload "$ZIP_PILOT_DIR/payload-v1" \
+  --truth "$ZIP_PILOT_DIR/truth.csv" \
+  --overlap "$ZIP_PILOT_DIR/samefile-v7-overlap" \
+  --routing oracle-format --knn-mode mutual \
+  --k 15 --threshold 0.5 --zip-alpha 0.5 --resolution 1.0 \
+  --seeds 0 1 2 3 4 \
+  --output "$ZIP_PILOT_DIR/grouping-oracle-mutual-v1"
+```
+
+`parameters.json`에 `knn_mode`를 저장하고 보고서에 연결 선택 방식을 표시한다.
+기존 점수·payload·grouping 결과는 덮어쓰지 않는다. GPU 재추론은 필요 없다.
+`audit_grouping.py`도 새 방식을 재현해 진단할 수 있으며, 예전 결과에 `knn_mode`가
+없으면 당시 방식인 union으로 해석한다.

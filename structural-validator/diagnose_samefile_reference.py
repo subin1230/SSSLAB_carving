@@ -7,7 +7,8 @@ import numpy as np
 
 from score_samefile_pilot import (
     HIDDEN_LAYER, REFERENCE_ATOL, REFERENCE_RTOL, extract_embeddings,
-    load_models_cpu, pair_batches, pair_features, reference_sample, sigmoid,
+    add_runtime_arguments, load_models, pair_batches, pair_features,
+    reference_batch_context, reference_sample, sigmoid,
 )
 from zip_pair_payload import file_hash
 
@@ -101,8 +102,12 @@ def main():
     for name in ('encoder-model', 'pair-model', 'reference-blocks', 'reference-embeddings', 'output'):
         p.add_argument('--'+name, required=True)
     p.add_argument('--reference-manifest')
-    p.add_argument('--threads', type=int, default=2)
+    p.add_argument('--reference-batch-size', type=int, default=0,
+                   help='Also compare selected rows in their original contiguous inference batches')
+    add_runtime_arguments(p)
     a = p.parse_args()
+    if a.reference_batch_size < 0:
+        raise ValueError('reference batch size must be nonnegative')
     output = Path(a.output)
     if output.exists():
         raise FileExistsError('output exists; choose a new diagnostic directory')
@@ -115,25 +120,57 @@ def main():
             if path.stat().st_size > 1024*1024:
                 raise ValueError('reference manifest unexpectedly exceeds 1 MiB')
             original_manifest.update(sha256=file_hash(path), content=json.loads(path.read_text()))
-    encoder, head, provenance = load_models_cpu(a)
+            recorded_size = original_manifest['content'].get('batch_size')
+            if a.reference_batch_size and recorded_size is not None and recorded_size != a.reference_batch_size:
+                raise ValueError('reference batch size differs from the original manifest')
+    encoder, head, provenance = load_models(a)
     print(f'[기존 임베딩 {len(batch)}행 진단 — 전체 점수 생성 아님]', flush=True)
     report, actual, singles = diagnose_samples(
         batch, reference, metadata['rows'], encoder.predict_on_batch, head.predict_on_batch)
+    arrays = dict(reference_rows=np.asarray(metadata['rows']), stored=reference,
+                  actual=actual, batch_one=singles)
+    failure = None
+    if a.reference_batch_size:
+        print(f'\n[원래 배치 {a.reference_batch_size:,} 재현]', flush=True)
+        try:
+            contextual, context = reference_batch_context(
+                a.reference_blocks, metadata['rows'], encoder.predict_on_batch, a.reference_batch_size)
+            arrays['original_batch'] = contextual
+            report['original_batch_context'] = dict(
+                status='complete', batch_context=context,
+                reference_comparison=embedding_report(contextual, reference, metadata['rows']),
+                sample_batch_difference=difference_summary(contextual, actual),
+                pair_score_effect=pair_score_report(contextual, reference, head.predict_on_batch))
+        except Exception as exc:
+            failure = exc
+            report['original_batch_context'] = dict(status='failed', error_type=type(exc).__name__,
+                                                    error=str(exc), batch_size=a.reference_batch_size)
     report.update(provenance=provenance, reference_sample=metadata,
                   reference_manifest=original_manifest, hidden_layer=HIDDEN_LAYER,
                   tolerance_changed=False, pilot_scoring_started=False,
+                  diagnostic_status='partial_failure' if failure else 'complete',
                   note='Diagnostic completion does not approve inference. Inspect preprocessing, model provenance, runtime and downstream score differences before deciding how to proceed.')
     output.mkdir(parents=True, exist_ok=False)
-    np.savez(output/'embedding_samples.npz', reference_rows=np.asarray(metadata['rows']),
-             stored=reference, actual=actual, batch_one=singles)
+    np.savez(output/'embedding_samples.npz', **arrays)
     (output/'diagnosis.json').write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False)+'\n')
     for key in ('provenance', 'reference_comparison', 'repeat_inference',
                 'batch_one_vs_sample_batch', 'pair_score_effect'):
         content = dict(report[key])
         content.pop('per_row', None)
+        content.pop('worst_coordinates', None)
         print(f'\n[{key}]')
         print(json.dumps(content, ensure_ascii=False, indent=2))
+    if 'original_batch_context' in report:
+        content = json.loads(json.dumps(report['original_batch_context']))
+        content.get('batch_context', {}).pop('windows', None)
+        content.get('reference_comparison', {}).pop('per_row', None)
+        content.get('reference_comparison', {}).pop('worst_coordinates', None)
+        print('\n[original_batch_context]')
+        print(json.dumps(content, ensure_ascii=False, indent=2))
     print('\n진단 저장:', output/'diagnosis.json')
+    if failure is not None:
+        print('원래 배치 검사 실패: 부분 진단만 저장. 파일럿 점수는 생성하지 않음.')
+        raise RuntimeError('Original batch diagnostic failed; partial diagnosis was saved. No scoring was started.') from failure
     print('진단만 완료. 허용오차 변경·파일럿 점수 생성은 수행하지 않음.')
 
 

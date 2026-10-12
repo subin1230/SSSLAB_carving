@@ -80,7 +80,7 @@ class ReferenceDiagnosisTests(unittest.TestCase):
             argv = ['diagnose_samefile_reference.py', '--encoder-model', 'unused',
                     '--pair-model', 'unused', '--reference-blocks', str(raw),
                     '--reference-embeddings', str(emb), '--output', str(output)]
-            with patch('sys.argv', argv), patch('diagnose_samefile_reference.load_models_cpu', return_value=models), contextlib.redirect_stdout(io.StringIO()):
+            with patch('sys.argv', argv), patch('diagnose_samefile_reference.load_models', return_value=models), contextlib.redirect_stdout(io.StringIO()):
                 main()
                 with self.assertRaises(FileExistsError):
                     main()
@@ -93,6 +93,43 @@ class ReferenceDiagnosisTests(unittest.TestCase):
             self.assertEqual(emb.read_bytes(), original)
             with self.assertRaisesRegex(ValueError, 'do not reproduce'):
                 verify_reference(raw, emb, encode)
+
+    def test_original_batch_report_and_resource_failure_remain_distinct(self):
+        for fail_original in (False, True):
+            with self.subTest(fail_original=fail_original), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                raw, emb, output = root/'raw.npy', root/'emb.npy', root/'diagnosis'
+                np.save(raw, np.ones((20, 512), dtype=np.uint8))
+                saved = np.full((20, 256), 8, dtype=np.float32)
+                saved[16:] = 4
+                np.save(emb, saved)
+                def encode(x):
+                    if fail_original and len(x) == 8:
+                        raise MemoryError('simulated GPU cap reached')
+                    return np.full((len(x), 256), len(x), dtype=np.float32)
+                models = (SimpleNamespace(predict_on_batch=encode),
+                          SimpleNamespace(predict_on_batch=lambda x: x[:, :1]), {'test_double': True})
+                argv = ['diagnose_samefile_reference.py', '--encoder-model', 'unused',
+                        '--pair-model', 'unused', '--reference-blocks', str(raw),
+                        '--reference-embeddings', str(emb), '--output', str(output),
+                        '--reference-batch-size', '8']
+                with patch('sys.argv', argv), patch('diagnose_samefile_reference.load_models', return_value=models), contextlib.redirect_stdout(io.StringIO()):
+                    if fail_original:
+                        with self.assertRaisesRegex(RuntimeError, 'partial diagnosis was saved'):
+                            main()
+                    else:
+                        main()
+                r = json.loads((output/'diagnosis.json').read_text())
+                self.assertFalse(r['reference_comparison']['strict_reference_matched'])
+                self.assertFalse(r['pilot_scoring_started'])
+                if fail_original:
+                    self.assertEqual(r['diagnostic_status'], 'partial_failure')
+                    self.assertEqual(r['original_batch_context']['status'], 'failed')
+                    self.assertNotIn('reference_comparison', r['original_batch_context'])
+                else:
+                    self.assertEqual(r['diagnostic_status'], 'complete')
+                    self.assertTrue(r['original_batch_context']['reference_comparison']['strict_reference_matched'])
+                    self.assertEqual(r['original_batch_context']['batch_context']['processed_rows'], 20)
 
 
 if __name__ == '__main__':

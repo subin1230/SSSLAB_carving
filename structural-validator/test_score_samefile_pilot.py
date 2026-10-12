@@ -10,7 +10,7 @@ import unittest
 import numpy as np
 
 from score_samefile_pilot import (extract_embeddings, pair_batches, pair_features,
-                                 sigmoid, verify_reference, write_scores)
+                                 reference_batch_context, sigmoid, verify_reference, write_scores)
 
 
 def dummy_encoder(batch):
@@ -84,6 +84,36 @@ class SameFileScoringTests(unittest.TestCase):
             self.assertEqual(json.loads((out/'run_state.json').read_text())['status'], 'complete')
             with self.assertRaises(FileExistsError):
                 write_scores(x, h, lambda f: f[:, :1], out, 2, {})
+
+    def test_reference_original_batches_restore_positions_and_final_short_batch(self):
+        x = np.repeat(np.arange(20, dtype=np.uint8)[:, None], 512, axis=1)
+        calls = []
+        def encode(batch):
+            calls.append(batch[:, 0].tolist())
+            return dummy_encoder(batch)+len(batch)
+        with tempfile.TemporaryDirectory() as tmp:
+            raw, emb = Path(tmp)/'raw.npy', Path(tmp)/'emb.npy'
+            np.save(raw, x)
+            expected = extract_embeddings(x, encode, 8)
+            np.save(emb, expected)
+            calls.clear()
+            with contextlib.redirect_stdout(io.StringIO()):
+                actual, meta = reference_batch_context(raw, [19, 2, 7, 2, 9], encode, 8)
+            np.testing.assert_array_equal(actual, expected[[19, 2, 7, 2, 9]])
+            self.assertEqual(calls, [list(range(8)), list(range(8, 16)), list(range(16, 20))])
+            self.assertEqual(meta['processed_rows'], 20)
+            self.assertEqual(meta['compared_rows'], 5)
+            with self.assertRaisesRegex(ValueError, 'do not reproduce'):
+                verify_reference(raw, emb, encode)
+            with contextlib.redirect_stdout(io.StringIO()):
+                verification = verify_reference(raw, emb, encode, reference_batch_size=8)
+            self.assertTrue(verification['matched'])
+            self.assertEqual(verification['inference_mode'], 'original_batch_context')
+            with self.assertRaisesRegex(ValueError, 'do not reproduce'), contextlib.redirect_stdout(io.StringIO()):
+                verify_reference(raw, emb, lambda b: encode(b)/255, reference_batch_size=8)
+            for bad_rows in ([-1], [20], [1.5], []):
+                with self.assertRaises(ValueError):
+                    reference_batch_context(raw, bad_rows, encode, 8)
 
     def test_partial_run_marked_failed_on_bad_model_output(self):
         x = np.ones((3, 512), dtype=np.uint8)

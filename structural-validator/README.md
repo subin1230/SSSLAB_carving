@@ -593,6 +593,55 @@ python diagnose_samefile_reference.py \
 설치나 재학습 없이 별도 프로세스에서 수행하며, GPU는 자동으로 사용하지 않는다.
 파일럿 전체 Same-File 점수는 기존 재현 검사 통과 후 별도로 생성한다.
 
+**GPU 및 원래 배치 조건 비교**
+
+CPU 두 환경과 oneDNN 설정 변경에서도 재현되지 않으면, GPU를 명시해 진단할 수 있다.
+GPU 지원 TensorFlow가 있는 `/home/narin/venvs/fifty-v3/bin/python`을 사용한다.
+`ffc-export` 환경에서 확인된 TF 빌드는 CPU 전용이므로 GPU 명령에는 사용하지 않는다.
+
+```sh
+/home/narin/venvs/fifty-v3/bin/python diagnose_samefile_reference.py \
+  --encoder-model /home/narin/fifty/fifty/utilities/models/512_1.h5 \
+  --pair-model /home/narin/samefile_v7/main_results/v7_mlp_seed42.keras \
+  --reference-blocks /home/narin/samefile_v7/v7_raw_blocks_final.npy \
+  --reference-embeddings /home/narin/samefile_v7/v7_embeddings.npy \
+  --reference-manifest /home/narin/samefile_v7/v7_embedding_manifest.json \
+  --device gpu --gpu-index 2 --gpu-memory-mb 2048 \
+  --reference-batch-size 4096 \
+  --output /path/to/pilot/reference-diagnosis-gpu2
+```
+
+`--gpu-index`는 사용할 **nvidia-smi GPU 번호**이다. 위 2번은 예시이며 서버 배정에
+맞춰 지정한다. 시작 직전 UUID와 여유 메모리를 조회한 후 해당 GPU 하나만 공개한다.
+기존 `CUDA_VISIBLE_DEVICES` 제한이 있으면 덮어쓰지 않고 중단한다. 메모리 여유는
+예약이 아니며, 요청 상한에 추가 1,024MiB 여유가 없으면 시작하지 않는다.
+TensorFlow 할당 메모리 상한은 기본 2,048MiB이며 CUDA 컨텍스트 등 추가 사용량은
+별도로 발생할 수 있다. 메모리 부족이나 GPU 미발견 시 CPU 전환·배치 축소·상한 확대를
+자동으로 수행하지 않는다. 원래 배치에서 실패하면 가능한 소배치 진단은 저장하되
+`diagnostic_status=partial_failure`로 남기고 오류 종료한다.
+
+- 기존 16행 묶음·한 행씩 계산 결과와 함께 `original_batch_context`를 기록한다.
+  각 표본의 **실제 원본 배치 구간**을 계산하며 마지막 짧은 배치도 그대로 유지한다.
+  16행만 4,096개로 복제하거나 패딩하지 않는다. 원래 배열을 최대 16개 배치까지
+  계산하므로, 비교 행은 16개여도 실제 계산 행 수는 최대 65,536개이다.
+- `original_batch_context.reference_comparison.strict_reference_matched`가 원래
+  배치 조건의 통과 여부이다. 이 값과 기존 `reference_comparison`을 구분한다.
+  두 검사 모두 기존 `atol=rtol=1e-4`를 유지하며, 16행 표본 검사이다.
+- 장치 UUID·이름·모델 변수 위치·메모리 상한·TF32 상태와 배치별 범위·입력 해시를
+  저장한다. `--tf32 on` 또는 `--tf32 off`로 별도 프로세스에서 비교할 수 있다.
+  기본 `default`는 TF 설정을 바꾸지 않는다. TF32가 실제 모든 연산에 사용됐다는
+  뜻은 아니며, 원래 manifest에도 TF32 설정 기록이 없어 원인을 미리 확정하지 않는다.
+- 진단 성공은 grouping 평가가 아니다. 통과한 실행 조건을 고정한 후 기존 `score`
+  명령에 같은 `--device`, `--gpu-index`, `--gpu-memory-mb`, `--tf32` 옵션을 준다.
+  원래 배치 조건으로 통과했다면 `--reference-batch-size 4096`을 주어 점수 생성 직전
+  같은 검사를 다시 통과해야 한다. `--batch-size`는 별도로 우리 블록·쌍의 추론 배치
+  크기를 정하며, 짧은 마지막 배치를 패딩하지 않는다. 파일럿 전 행의 수치 재현이나
+  최종 grouping의 수치 민감도까지 검증한 것으로 해석하지 않는다.
+
+메모리 제한과 TF32 설정은 TensorFlow의
+[GPU 가이드](https://www.tensorflow.org/guide/gpu)와
+[TF32 API](https://www.tensorflow.org/api_docs/python/tf/config/experimental/enable_tensor_float_32_execution)를 따른다.
+
 1,600블록의 순서 없는 모든 쌍 **1,279,200개**를 배치로 계산한다. 정답 포맷으로
 쌍을 걸러내지 않으므로 서로 다른 포맷의 쌍도 포함한다. V7은 같은 포맷 안의 다른 파일을
 음성으로 학습했으므로 포맷 간 점수는 학습 조건 밖의 탐색 결과이다. 실제 동일 포맷

@@ -11,6 +11,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import time
 
@@ -93,9 +94,41 @@ def reference_sample(block_path, embedding_path):
     return batch, reference, metadata
 
 
-def verify_reference(block_path, embedding_path, predict):
+def reference_batch_context(block_path, rows, predict, batch_size):
+    """Recreate each selected row's original contiguous inference batch."""
+    raw = load_blocks(block_path)
+    rows = np.asarray(rows)
+    if (batch_size < 1 or rows.ndim != 1 or not len(rows)
+            or rows.dtype.kind not in 'iu' or (rows < 0).any() or (rows >= len(raw)).any()):
+        raise ValueError('invalid reference batch size or row indices')
+    result = np.empty((len(rows), HIDDEN_DIM), dtype=np.float32)
+    starts = (rows // batch_size)*batch_size
+    windows = []
+    for start in np.unique(starts):
+        start = int(start)
+        end = min(start+batch_size, len(raw))
+        batch = np.asarray(raw[start:end])
+        h = extract_embeddings(batch, predict, len(batch))
+        selected = np.flatnonzero(starts == start)
+        result[selected] = h[rows[selected]-start]
+        windows.append(dict(start=start, end_exclusive=end, rows=end-start,
+                            raw_sha256=hashlib.sha256(batch.tobytes()).hexdigest()))
+        print(f'원래 배치 재현: {start:,}:{end:,} ({len(windows)}개 배치 완료)', flush=True)
+    return result, dict(batch_size=batch_size, windows=windows,
+                        processed_rows=sum(w['rows'] for w in windows), compared_rows=len(rows),
+                        note='Original raw order and final short batch preserved; no padding or sample duplication. Only selected rows are compared.')
+
+
+def verify_reference(block_path, embedding_path, predict, reference_batch_size=0):
     batch, reference, metadata = reference_sample(block_path, embedding_path)
-    actual = extract_embeddings(batch, predict, len(batch))
+    if reference_batch_size < 0:
+        raise ValueError('reference batch size must be nonnegative')
+    if reference_batch_size:
+        actual, context = reference_batch_context(block_path, metadata['rows'], predict, reference_batch_size)
+        metadata.update(inference_mode='original_batch_context', batch_context=context)
+    else:
+        actual = extract_embeddings(batch, predict, len(batch))
+        metadata.update(inference_mode='sample_batch', batch_size=len(batch))
     difference = float(np.max(np.abs(actual-reference)))
     if not np.allclose(actual, reference, atol=REFERENCE_ATOL, rtol=REFERENCE_RTOL):
         raise ValueError(f'reference embeddings do not reproduce (max absolute difference={difference}); check encoder, layer, preprocessing and TensorFlow environment. Run diagnose_samefile_reference.py for details; scoring was not started.')
@@ -166,57 +199,127 @@ def environment():
             print(path)
 
 
-def load_models_cpu(args):
-    """Shared inference setup for strict scoring and read-only diagnostics."""
+def add_runtime_arguments(parser):
+    parser.add_argument('--threads', type=int, default=2)
+    parser.add_argument('--device', choices=('cpu', 'gpu'), default='cpu')
+    parser.add_argument('--gpu-index', type=int, help='nvidia-smi index; required for GPU')
+    parser.add_argument('--gpu-memory-mb', type=int, default=2048,
+                        help='TensorFlow GPU allocator cap; CUDA overhead can be additional')
+    parser.add_argument('--tf32', choices=('default', 'on', 'off'), default='default')
+
+
+def prepare_device_environment(args, environ, query_gpu=None):
+    """Select an explicit GPU by UUID before importing TF; never pick a busy GPU silently."""
     if args.threads < 1:
         raise ValueError('threads must be positive')
+    if args.device == 'cpu':
+        if args.gpu_index is not None or args.tf32 != 'default':
+            raise ValueError('GPU index/TF32 options require --device gpu')
+        environ['CUDA_VISIBLE_DEVICES'] = '-1'
+        return None
+    if args.gpu_index is None or args.gpu_index < 0 or args.gpu_memory_mb < 256:
+        raise ValueError('GPU requires a nonnegative --gpu-index and memory cap >= 256 MiB')
+    if 'CUDA_VISIBLE_DEVICES' in environ:
+        raise ValueError('CUDA_VISIBLE_DEVICES is already set. Refusing to overwrite an existing GPU allocation; inspect the assigned devices before choosing an index.')
+    if query_gpu is None:
+        def query_gpu(index):
+            return subprocess.run(
+                ['nvidia-smi', '--id='+str(index), '--query-gpu=uuid,name,memory.free',
+                 '--format=csv,noheader,nounits'], check=True, capture_output=True,
+                text=True, timeout=10).stdout
+    records = list(csv.reader(query_gpu(args.gpu_index).strip().splitlines()))
+    if len(records) != 1 or len(records[0]) != 3:
+        raise ValueError('cannot identify exactly one GPU from nvidia-smi')
+    uuid, name, free_text = [v.strip() for v in records[0]]
+    if not uuid.startswith('GPU-'):
+        raise ValueError('expected a physical GPU UUID; MIG is not supported here')
+    free_mb = int(free_text)
+    if free_mb < args.gpu_memory_mb+1024:
+        raise ValueError(f'GPU {args.gpu_index} has only {free_mb} MiB free; require cap plus 1024 MiB headroom. No GPU was selected.')
+    # UUID avoids index reordering between CUDA and nvidia-smi.
+    environ['CUDA_VISIBLE_DEVICES'] = uuid
+    return dict(nvidia_smi_index=args.gpu_index, uuid=uuid, name=name,
+                free_memory_mib_before_load=free_mb, tensorflow_memory_limit_mib=args.gpu_memory_mb,
+                note='Free memory is a snapshot, not a reservation. Other jobs remain running.')
+
+
+class DevicePredictor:
+    def __init__(self, tf, model, device):
+        self.tf, self.model, self.device = tf, model, device
+
+    def predict_on_batch(self, batch):
+        with self.tf.device(self.device):
+            return self.model.predict_on_batch(batch)
+
+
+def load_models(args):
+    """Shared inference setup. CPU default; explicitly selected GPU has a memory cap."""
     if importlib.util.find_spec('tensorflow') is None:
         raise SystemExit('현재 Python에 TensorFlow가 없음. 먼저 python3 score_samefile_pilot.py environment 결과를 확인하세요. 데이터/모델은 변경하지 않았습니다.')
-    # CPU default for shared-server inference. Do not reserve someone else's GPU.
-    os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
+    if 'tensorflow' in sys.modules:
+        raise RuntimeError('start a fresh process: device setup must precede TensorFlow import')
+    gpu = prepare_device_environment(args, os.environ)
     os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '2')
     import tensorflow as tf
     tf.config.threading.set_intra_op_parallelism_threads(args.threads)
     tf.config.threading.set_inter_op_parallelism_threads(1)
+    device = '/GPU:0' if gpu else '/CPU:0'
+    if gpu:
+        devices = tf.config.list_physical_devices('GPU')
+        if len(devices) != 1:
+            raise RuntimeError('selected GPU is not available to TensorFlow; CPU fallback is not allowed')
+        tf.config.set_logical_device_configuration(
+            devices[0], [tf.config.LogicalDeviceConfiguration(memory_limit=args.gpu_memory_mb)])
+        if args.tf32 != 'default':
+            tf.config.experimental.enable_tensor_float_32_execution(args.tf32 == 'on')
+        gpu['tensorflow_device_details'] = tf.config.experimental.get_device_details(devices[0])
     tf.keras.utils.set_random_seed(42)
     encoder_hash, pair_hash = file_hash(args.encoder_model), file_hash(args.pair_model)
-    fifty = tf.keras.models.load_model(args.encoder_model, compile=False)
-    if tuple(fifty.input_shape) != (None, 512):
-        raise ValueError(f'unexpected FiFTy input shape: {fifty.input_shape}')
-    encoder = tf.keras.Model(inputs=fifty.input, outputs=fifty.get_layer(HIDDEN_LAYER).output)
-    if tuple(encoder.output_shape) != (None, HIDDEN_DIM):
-        raise ValueError('unexpected hidden dimension')
-    head = tf.keras.models.load_model(args.pair_model, compile=False)
+    with tf.device(device):
+        fifty = tf.keras.models.load_model(args.encoder_model, compile=False)
+        if tuple(fifty.input_shape) != (None, 512):
+            raise ValueError(f'unexpected FiFTy input shape: {fifty.input_shape}')
+        encoder = tf.keras.Model(inputs=fifty.input, outputs=fifty.get_layer(HIDDEN_LAYER).output)
+        if tuple(encoder.output_shape) != (None, HIDDEN_DIM):
+            raise ValueError('unexpected hidden dimension')
+        head = tf.keras.models.load_model(args.pair_model, compile=False)
     if tuple(head.input_shape) != (None, 512) or tuple(head.output_shape) != (None, 1):
         raise ValueError('unexpected Same-File MLP shape')
     activation = tf.keras.activations.serialize(head.layers[-1].activation)
     if activation != 'linear':
         raise ValueError('expected V7 main MLP linear logit output; refusing a second sigmoid')
+    if gpu and any('GPU:0' not in v.device for v in list(encoder.variables)+list(head.variables)):
+        raise RuntimeError('model variables were not placed on the selected GPU')
     provenance = dict(
         python=sys.executable, python_version=sys.version.split()[0],
         tensorflow=tf.__version__, keras=getattr(tf.keras, '__version__', None),
-        numpy=np.__version__, device='CPU', intra_op_threads=args.threads,
+        numpy=np.__version__, device='GPU' if gpu else 'CPU', intra_op_threads=args.threads,
+        requested_placement=device, gpu=gpu, tf32_requested=args.tf32,
+        tf32_enabled=bool(tf.config.experimental.tensor_float_32_execution_enabled()),
         onednn_environment=os.environ.get('TF_ENABLE_ONEDNN_OPTS', 'unset'),
         tensorflow_build=tf.sysconfig.get_build_info(),
         visible_devices=[d.name for d in tf.config.get_visible_devices()],
         encoder_model=str(Path(args.encoder_model).resolve()), encoder_model_sha256=encoder_hash,
         pair_model=str(Path(args.pair_model).resolve()), pair_model_sha256=pair_hash,
+        encoder_variable_devices=sorted({v.device for v in encoder.variables}),
+        pair_variable_devices=sorted({v.device for v in head.variables}),
     )
-    return encoder, head, provenance
+    return DevicePredictor(tf, encoder, device), DevicePredictor(tf, head, device), provenance
 
 
 def score(args):
     output = Path(args.output)
     if output.exists():
         raise FileExistsError('output exists; choose a new output directory')
-    if args.batch_size < 1:
-        raise ValueError('batch size must be positive')
+    if args.batch_size < 1 or args.reference_batch_size < 0:
+        raise ValueError('batch size must be positive and reference batch size nonnegative')
     x = load_blocks(args.blocks)
     if len(x) < 2:
         raise ValueError('requires at least two blocks')
-    encoder, head, provenance = load_models_cpu(args)
+    encoder, head, provenance = load_models(args)
     print('[기존 임베딩 재현 검사]', flush=True)
-    reference = verify_reference(args.reference_blocks, args.reference_embeddings, encoder.predict_on_batch)
+    reference = verify_reference(args.reference_blocks, args.reference_embeddings,
+                                 encoder.predict_on_batch, args.reference_batch_size)
     print(json.dumps(reference, indent=2), flush=True)
     print(f'[우리 블록 {len(x):,}개 임베딩 추출]', flush=True)
     embeddings = extract_embeddings(x, encoder.predict_on_batch, args.batch_size)
@@ -232,7 +335,9 @@ def main():
     for name in ('blocks', 'encoder-model', 'pair-model', 'reference-blocks', 'reference-embeddings', 'output'):
         s.add_argument('--'+name, required=True)
     s.add_argument('--batch-size', type=int, default=1024)
-    s.add_argument('--threads', type=int, default=2)
+    s.add_argument('--reference-batch-size', type=int, default=0,
+                   help='0: sample batch; otherwise verify in original contiguous inference batches')
+    add_runtime_arguments(s)
     a = p.parse_args()
     if a.command == 'environment':
         environment()

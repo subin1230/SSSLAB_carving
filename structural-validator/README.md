@@ -434,8 +434,64 @@ UNKNOWN으로 남긴다. 비압축 데이터가 빈 경우에도 같은 원칙�
 고유 쌍 수와, FAIL로 제외된 **정확한 대상 관계 수** 및 **다른 파일 관계 수**가 기록된다.
 통과 집합의 정밀도만 보지 말고 적용 건수, 정답 연결 손실, 같은 파일의 다른 위치 관계도
 함께 확인한다. 입력 바이트와 저장된 후보 파일의 해시를 확인하고 기존 결과는 덮어쓰지 않는다.
-아직 서버 파일럿의 개선 효과는 실행 전이며 생성 ZIP으로 로직만 검증했다.
+서버 파일럿 결과는 아래와 같으며, 생성 ZIP을 이용한 로직 테스트와 구분한다.
 
 CRC·ZIP 데이터 필드는 [PKWARE APPNOTE](https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT),
 raw Deflate의 종료·잔여 데이터 확인은 [Python zlib 문서](https://docs.python.org/3/library/zlib.html)를
 참조한다. 원래 구조를 확인할 데이터가 확보된 쌍에 대한 추가 검사이며 전체 ZIP 복구기는 아니다.
+
+### 파일럿 결과와 통과·실패 사례 사후 분석
+
+2026-10-12 서버의 50개 파일·1,600개 블록 편의 표본(`payload-v1`)에서 보고된
+`zip_next` 결과이다. 건수는 참조 관계 사건 수이며 고유 블록 쌍 수가 아니다.
+
+| 후보 집합 | 관계 수 | 정확한 대상 | 다른 파일 | 정확한 대상 비율 |
+|---|---:|---:|---:|---:|
+| 기존 후보 | 1,178 | 453 | 709 | 38.46% |
+| FAIL만 제외 | 903 | 453 | 441 | 50.17% |
+| PASS만 선택 | 221 | 218 | 3 | 98.64% |
+
+FAIL 275건은 다른 파일 관계 268건과 같은 파일의 잘못된 위치 관계 7건이었다.
+따라서 정확한 참조 대상 453건은 유지했지만, 같은 파일 관계를 모두 유지한 것은 아니다.
+PASS만 선택하면 정확한 대상 관계도 453건에서 218건으로 줄어든다.
+통과 집합의 98.64%를 전체 연결 정확도나 grouping 성능으로 보고하면 안 된다.
+`cd_local`·`eocd`는 이번 payload 검사에서 모두 UNKNOWN으로 유지됐다.
+
+`audit_zip_payload.py`는 다른 파일인데 PASS한 사례와 같은 파일인데 FAIL한 사례를
+정답 위치에 비추어 분석한다. 기존 블록·후보 파일 해시를 확인하고, 모든 관계의
+payload 검사를 재실행하여 저장된 근거와 일치하는지 확인한 뒤 보고서를 만든다.
+기존 `check`·후보 생성에는 정답이 들어가지 않으며, **이 분석에서만** `truth.csv`를 읽는다.
+
+```sh
+python3 audit_zip_payload.py \
+  --blocks /path/to/pilot/blocks.npy \
+  --truth /path/to/pilot/truth.csv \
+  --run /path/to/pilot/payload-v1 \
+  --output /path/to/pilot/payload-audit-v1
+```
+
+- `audit_summary.json`: PASS/FAIL/UNKNOWN별 관계 수·고유 무방향 쌍 수·관련 블록 수·
+  원본 파일 수와 출발 포맷별 집계. 서로 다른 범주의 블록·파일 수는 중복될 수 있다.
+- `cross_file_pass.jsonl`: 다른 원본 파일을 연결했는데 PASS한 모든 사례.
+  실제 정답 대상이 표본에 있으면 대상 블록 전체, 사용된 대상 payload 구간,
+  재구성한 압축 데이터, 압축 해제한 데이터를 각각 비교한다. 비교는 실제 바이트
+  equality로 수행하며 SHA-256도 기록한다. payload 전체나 원본 파일은 새로 저장하지 않는다.
+- `same_file_wrong_target_fail.jsonl`: 같은 파일의 다른 위치를 연결해서 FAIL한 사례.
+  선언된 정답 위치와의 블록 차이, 실제 정답 대상에 대한 재검사 결과를 기록한다.
+- `exact_target_fail.jsonl`: 정확한 대상인데 FAIL한 사례. 0건이어도 빈 파일을 저장한다.
+
+다른 파일 PASS의 `comparison` 해석은 다음과 같다.
+
+| 값 | 확인한 내용 |
+|---|---|
+| `IDENTICAL_TARGET_BLOCK` | 정답 대상과 후보의 512바이트 전체가 같음 |
+| `IDENTICAL_RECONSTRUCTED_COMPRESSED_PAYLOAD` | 대상 블록 전체는 다르지만 재구성한 압축 데이터는 같음 |
+| `IDENTICAL_DECODED_PAYLOAD_ONLY` | 압축 데이터는 다르지만 압축 해제 결과는 같음 |
+| `DIFFERENT_DECODED_BYTES_WITH_SAME_SIZE_AND_CRC` | 해제한 바이트도 다르지만 길이와 CRC가 같음 |
+| `REFERENCE_TARGET_ABSENT` | 정답 대상 블록이 표본에 없어 비교하지 못함 |
+| `REFERENCE_SIGNATURE_MISMATCH` | 정답 위치에 예상한 다음 헤더 시그니처가 없어 추가 검토 필요 |
+| `REFERENCE_PAIR_NOT_PASS` | 실제 정답 대상을 연결해도 PASS하지 않아 추가 검토 필요 |
+
+바이트가 같다는 결과는 비교한 구간의 내용 일치를 뜻하며, 원본 아카이브 전체의 동일성이나
+어떤 파일이 다른 파일을 복사했다는 이력을 증명하지 않는다. 정답 대상 재구성은 사후 진단
+전용이다. 이 보고서는 점수·후보·grouping 입력을 변경하지 않으며 기존 출력도 덮어쓰지 않는다.

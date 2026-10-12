@@ -12,7 +12,7 @@ from unittest.mock import patch
 import numpy as np
 
 from compare_samefile_grouping import (build_graphs, cluster, environment, evaluate_memberships,
-                                      load_scores, load_zip_pairs, metrics, pair_counts, run)
+                                      load_scores, load_zip_pairs, metrics, pair_counts, prepare_routing, run)
 from score_samefile_pilot import write_scores
 from test_score_samefile_pilot import dummy_encoder
 from test_zip_pair_payload import archive_blocks
@@ -56,6 +56,37 @@ def arguments(root, name='comparison', overlap=True):
 
 
 class GraphConstructionTests(unittest.TestCase):
+    def test_format_restriction_precedes_topk_and_applies_to_zip_too(self):
+        s = np.array([[0,.7,.99,.98], [.7,0,.97,.96],
+                      [.99,.97,0,.8], [.98,.96,.8,0]])
+        pairs = {(0,1), (0,2)}
+        labels, passed, info = prepare_routing('oracle-format', ['jar','jar','apk','apk'], pairs, 4)
+        r = build_graphs(s, passed, 1, .5, .5, labels)
+        self.assertEqual(r['samefile'], {(0,1):.7, (2,3):.8})
+        # Dropping edges AFTER unrestricted kNN would not recover (0,1).
+        self.assertNotIn((0,1), build_graphs(s, pairs, 1, .5, .5)['samefile'])
+        self.assertNotIn((0,2), r['samefile_zip'])
+        self.assertAlmostEqual(r['samefile_zip'][0,1], .85)
+        self.assertEqual(info['eligible_unordered_pairs'], 2)
+        self.assertEqual(info['pass_pairs_excluded_cross_format'], 1)
+        zero = build_graphs(s, passed, 1, .5, 0, labels)
+        self.assertEqual(zero['samefile'], zero['samefile_zip'])
+        # A format with only one block stays isolated even with a high ZIP score.
+        labels, passed, _ = prepare_routing('oracle-format', ['jar','jar','apk','docx'], pairs, 4)
+        isolated = build_graphs(s, passed, 1, .5, .5, labels)
+        self.assertEqual(set(isolated['samefile_zip']), {(0,1)})
+
+    def test_routing_requires_explicit_valid_format_labels(self):
+        for mode, formats in [('unsupported',None), ('all-pairs',['jar','jar']),
+                              ('oracle-format',None), ('oracle-format',['jar']),
+                              ('oracle-format',['jar',' '])]:
+            with self.assertRaises(ValueError):
+                prepare_routing(mode, formats, set(), 2)
+        labels, passed, info = prepare_routing('all-pairs', None, {(0,1)}, 2)
+        self.assertIsNone(labels)
+        self.assertFalse(info['ground_truth_format_used'])
+        self.assertEqual(passed, {(0,1)})
+
     def test_knn_union_threshold_and_soft_weight_without_truth(self):
         s = np.array([[0,.8,.1,.0], [.8,0,.9,.0], [.1,.9,0,.0], [.0,.0,.0,0]])
         base = build_graphs(s, {(0,2)}, 1, .5, 0)
@@ -120,6 +151,46 @@ class GraphConstructionTests(unittest.TestCase):
 
 @unittest.skipUnless(READY, 'requires separate requirements-grouping.txt environment')
 class LeidenComparisonTests(unittest.TestCase):
+    def test_oracle_metadata_labels_scope_without_using_file_ids_or_offsets(self):
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(tmp)
+            x = fixture(root)
+            path = root/'truth.csv'
+            rows = list(csv.DictReader(io.StringIO(path.read_text())))
+            for row in rows[len(x)//2:]:
+                row['format'] = 'apk'
+            def save_truth():
+                with path.open('w', newline='') as f:
+                    w = csv.DictWriter(f, fieldnames=list(rows[0]))
+                    w.writeheader()
+                    w.writerows(rows)
+            save_truth()
+            args = arguments(root, 'oracle', overlap=False)
+            args.routing = 'oracle-format'
+            result = run(args)
+            self.assertTrue(result['graph_truth_used'])
+            self.assertEqual(result['experiment'], 'samefile-zip-leiden-oracle-format-pilot-v1')
+            self.assertGreater(result['routing']['pass_pairs_excluded_cross_format'], 0)
+            self.assertIn('실제 FFC', (root/'oracle/report.md').read_text())
+            with (root/'oracle/graph_edges.csv').open() as f:
+                edges = list(csv.DictReader(f))
+            self.assertTrue(edges)
+            for e in edges:
+                self.assertEqual(rows[int(e['sample_id_1'])]['format'], rows[int(e['sample_id_2'])]['format'])
+            from audit_grouping import audit
+            checked = audit(root/'blocks.npy', path, root/'oracle', root/'oracle-audit')
+            self.assertEqual(checked['routing'], result['routing'])
+            for i, row in enumerate(rows):
+                row['source_file_id'] = f'arbitrary-source-{i}'
+                row['source_byte_offset'] = '0'
+            save_truth()
+            args.output = root/'changed-ids'
+            run(args)
+            self.assertEqual((root/'oracle/graph_edges.csv').read_bytes(),
+                             (root/'changed-ids/graph_edges.csv').read_bytes())
+            self.assertEqual((root/'oracle/memberships.csv').read_bytes(),
+                             (root/'changed-ids/memberships.csv').read_bytes())
+
     def test_known_partition_isolates_and_induced_reclustering(self):
         ids = np.arange(7)
         edges = {(0,1):1., (0,2):1., (1,2):1., (3,4):1., (3,5):1., (4,5):1.}

@@ -80,6 +80,44 @@ class GroupingAuditTests(unittest.TestCase):
 
 @unittest.skipUnless(READY,'requires requirements-grouping.txt environment')
 class GroupingAuditIntegrationTests(unittest.TestCase):
+    def test_original_run_without_routing_fields_still_audits(self):
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(tmp)
+            fixture(root)
+            run(arguments(root))
+            path = root/'comparison/comparison.json'
+            saved = json.loads(path.read_text())
+            del saved['routing']
+            del saved['parameters']['routing']
+            path.write_text(json.dumps(saved))
+            result = audit(root/'blocks.npy',root/'truth.csv',root/'comparison',root/'audit')
+            self.assertFalse(result['routing']['ground_truth_format_used'])
+            self.assertEqual(result['routing']['pass_pairs_excluded_cross_format'], 0)
+
+    def test_oracle_replay_keeps_within_format_wrong_pass_and_checks_provenance(self):
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(tmp)
+            fixture(root)
+            args = arguments(root)
+            args.routing = 'oracle-format'
+            run(args)
+            originals = {p: file_hash(p) for p in root.rglob('*') if p.is_file()}
+            with patch('compare_samefile_grouping.cluster', side_effect=AssertionError('no reclustering')):
+                result = audit(root/'blocks.npy',root/'truth.csv',root/'comparison',root/'audit')
+            self.assertTrue(result['routing']['ground_truth_format_used'])
+            self.assertEqual(result['routing']['pass_pairs_excluded_cross_format'], 0)
+            with (root/'audit/zip_pair_outcomes.csv').open() as f:
+                rows = list(csv.DictReader(f))
+            self.assertTrue(any(r['same_file']=='0' for r in rows))
+            for p,digest in originals.items():
+                self.assertEqual(file_hash(p),digest)
+            comparison = root/'comparison/comparison.json'
+            metadata = json.loads(comparison.read_text())
+            metadata['graph_truth_used'] = False
+            comparison.write_text(json.dumps(metadata))
+            with self.assertRaisesRegex(ValueError, 'routing/truth provenance'):
+                audit(root/'blocks.npy',root/'truth.csv',root/'comparison',root/'invalid-audit')
+
     def test_score_ranking_and_threshold_precision_have_different_denominators(self):
         s = np.zeros((4,4))
         s[0,1],s[0,2],s[0,3],s[1,2],s[1,3],s[2,3] = .9,.95,.99,.8,.1,.2

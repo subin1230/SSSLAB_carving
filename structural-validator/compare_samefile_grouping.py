@@ -1,7 +1,8 @@
 """Paired, exploratory Leiden experiment on frozen Same-File and ZIP evidence.
 
-Graph construction and clustering take no truth labels. Truth is used for
-evaluation and, optionally, a separately reclustered model-overlap cohort.
+By default graph construction and clustering take no truth labels. The explicit
+oracle-format diagnostic uses true format labels to restrict candidate pairs;
+it is not an end-to-end FFC result. File IDs/offsets never enter edge generation.
 """
 import argparse
 from collections import Counter
@@ -134,7 +135,34 @@ def load_zip_pairs(x, run):
                         negative_edges_used=False, truth_used=False)
 
 
-def build_graphs(scores, passed, k, threshold, alpha):
+def prepare_routing(mode, formats, passed, n):
+    """Only format labels are accepted here, never file IDs or source offsets."""
+    if mode not in ('all-pairs', 'oracle-format'):
+        raise ValueError('unsupported routing mode')
+    labels = None
+    counts = None
+    retained = set(passed)
+    eligible = n * (n - 1) // 2
+    if mode == 'oracle-format':
+        if (formats is None or len(formats) != n or
+                any(not isinstance(t, str) or not t.strip() for t in formats)):
+            raise ValueError('oracle routing requires one nonempty format per block')
+        labels = np.asarray([t.strip().lower() for t in formats])
+        counts = dict(sorted(Counter(labels.tolist()).items()))
+        eligible = sum(c * (c - 1) // 2 for c in counts.values())
+        retained = {(i, j) for i, j in passed if labels[i] == labels[j]}
+    elif formats is not None:
+        raise ValueError('all-pairs routing must not receive truth formats')
+    return labels, retained, dict(
+        mode=mode, ground_truth_format_used=labels is not None,
+        format_block_counts=counts, eligible_unordered_pairs=eligible,
+        pass_pairs_before_routing=len(passed), pass_pairs_after_routing=len(retained),
+        pass_pairs_excluded_cross_format=len(passed)-len(retained),
+        selection='restrict candidate domain BEFORE top-k, including ZIP additions',
+        leiden_scope='one graph; same global resolution/normalization, not separate per-format runs')
+
+
+def build_graphs(scores, passed, k, threshold, alpha, route_labels=None):
     """Symmetric union kNN baseline; add/boost each unique PASS pair once."""
     n = len(scores)
     if k < 1 or not 0 <= threshold <= 1 or not 0 <= alpha <= 1:
@@ -143,6 +171,8 @@ def build_graphs(scores, passed, k, threshold, alpha):
     for i in range(n):
         js = np.flatnonzero((scores[i] >= threshold) & (scores[i] > 0))
         js = js[js != i]
+        if route_labels is not None:
+            js = js[route_labels[js] == route_labels[i]]
         # Stable secondary key for exact ties, independent of true source order.
         js = js[np.lexsort((js, -scores[i, js]))[:k]]
         for j in js:
@@ -150,6 +180,8 @@ def build_graphs(scores, passed, k, threshold, alpha):
     augmented = dict(baseline)
     if alpha:  # alpha=0 is an exact no-op, including edge selection.
         for i, j in sorted(passed):
+            if route_labels is not None and route_labels[i] != route_labels[j]:
+                continue
             s = float(scores[i, j])
             augmented[i, j] = s + alpha * (1 - s)
     return dict(samefile=baseline, samefile_zip=augmented)
@@ -290,6 +322,17 @@ def write_report(path, result):
              '아래 값은 seed별 결과의 평균임. 차이는 ZIP 보완 − Same-File임.', '',
              '| 대상 | 지표 | Same-File | + ZIP | 차이 |',
              '|---|---|---:|---:|---:|']
+    oracle = result.get('graph_truth_used', False)
+    if oracle:
+        r = result['routing']
+        lines[2:2] = [
+            '**정답 포맷 라우팅을 사용한 oracle 원인 진단임. 실제 FFC 파이프라인 성능이 아님.**',
+            '동일 포맷 안에서 상위 k개 이웃을 다시 선택함. ZIP 보완도 동일 포맷 쌍에만 적용함.',
+            '원본 파일 ID·원본 위치·정답 그룹 수로 연결을 선택하지 않음.',
+            '포맷별 독립 Leiden 실행이 아니라, 포맷 간 연결이 없는 하나의 그래프에 같은 resolution을 적용함.',
+            f'라우팅 전 ZIP PASS {r["pass_pairs_before_routing"]}쌍 / '
+            f'적용 가능 {r["pass_pairs_after_routing"]}쌍 / '
+            f'다른 포맷으로 제외 {r["pass_pairs_excluded_cross_format"]}쌍.', '']
     def number(v):
         return '—' if v is None else f'{v:.6f}'
     for cohort, s in result['aggregate'].items():
@@ -306,7 +349,8 @@ def write_report(path, result):
               '- 모델 메타에서 미관측인 파일은 별도 유도 그래프에서 새로 clustering함. 전체 결과에서 점수만 잘라낸 것이 아님.',
               '- 편의 표본의 탐색적 비교임. seed 편차는 반복 실행 변동이며 독립 파일 표본의 신뢰구간이 아님.',
               '- k/임계값/보강량/resolution은 이번 파일럿용 고정 설정임. 나린님 원래 grouping을 재현한 결과가 아니며 이 결과로 최적값을 고르지 않음.',
-              '- 전체 혼합 포맷 그래프를 사용함. 정답 포맷으로 쌍을 걸러내지 않으며 V7의 동일 포맷 음성 학습 조건과 다름.',
+              ('- 정답 포맷이 알려졌다는 가정의 진단임. 개선되더라도 실제 FFC 예측 오류까지 해결한 결과나 성능 상한 증명은 아님.'
+               if oracle else '- 전체 혼합 포맷 그래프를 사용함. 정답 포맷으로 쌍을 걸러내지 않으며 V7의 동일 포맷 음성 학습 조건과 다름.'),
               '- PASS도 다른 파일의 동일 콘텐츠와 연결될 수 있음. 강제 병합·음성 제약·ZIP FAIL에 의한 점수 차감은 사용하지 않음.', '']
     Path(path).write_text('\n'.join(lines))
 
@@ -327,14 +371,22 @@ def run(args):
     scores, score_info = load_scores(x, args.scores)
     print('ZIP 후보·payload 판정을 바이트로 재검사', flush=True)
     passed, zip_info = load_zip_pairs(x, args.payload)
-    graphs = build_graphs(scores, passed, args.k, args.threshold, args.zip_alpha)
+    routing = getattr(args, 'routing', 'all-pairs')
+    truth = None
+    if routing == 'oracle-format':
+        print('ORACLE 진단: 정답 포맷으로 후보 범위를 제한함. 실제 FFC 결과 아님.', flush=True)
+        truth, _ = read_truth(args.truth, len(x))
+    route_labels, passed, routing_info = prepare_routing(
+        routing, [r['format'] for r in truth] if truth is not None else None, passed, len(x))
+    graphs = build_graphs(scores, passed, args.k, args.threshold, args.zip_alpha, route_labels)
     parameters = dict(k=args.k, threshold=args.threshold, zip_alpha=args.zip_alpha,
                       resolution=args.resolution, seeds=args.seeds,
                       graph='undirected union kNN after score threshold; ties by sample_id',
                       zip_weight='s + alpha * (1-s); add PASS pairs outside kNN; unique pair once',
                       alpha_zero='exact baseline including topology',
                       leiden_partition='RBConfigurationVertexPartition', n_iterations=-1,
-                      no_true_group_count_used=True, negative_constraints=False)
+                      no_true_group_count_used=True, negative_constraints=False,
+                      routing=routing)
     output.mkdir(parents=True, exist_ok=False)
     dump(output / 'run_state.json', dict(status='running'))
     records, partitions = [], []
@@ -368,8 +420,9 @@ def run(args):
             return inferred
 
         all_ids = np.arange(len(x))
-        full = infer('all_pilot', all_ids)  # Full inference BEFORE opening truth.
-        truth, _ = read_truth(args.truth, len(x))
+        full = infer('all_pilot', all_ids)
+        if truth is None:  # Default inference still completes BEFORE opening truth.
+            truth, _ = read_truth(args.truth, len(x))
         true_labels = np.asarray([r['source_file_id'] for r in truth])
         cohorts = dict(all_pilot=dict(blocks=len(x), files=len(set(true_labels)),
                                      sample_ids=all_ids.tolist()))
@@ -396,7 +449,8 @@ def run(args):
             w = csv.DictWriter(f, fieldnames=['cohort', 'variant', 'seed', 'sample_id', 'cluster_id'])
             w.writeheader()
             w.writerows(partitions)
-        result = dict(experiment='samefile-zip-leiden-pilot-v1', parameters=parameters,
+        result = dict(experiment=('samefile-zip-leiden-oracle-format-pilot-v1' if route_labels is not None
+                                  else 'samefile-zip-leiden-pilot-v1'), parameters=parameters,
                       environment=environment(), blocks_sha256=fingerprint(x),
                       truth_path=str(args.truth), truth_sha256=file_hash(args.truth),
                       scores=score_info, zip=zip_info, overlap=overlap_info, cohorts=cohorts,
@@ -404,7 +458,9 @@ def run(args):
                           added_edges=len(set(graphs[VARIANTS[1]])-set(graphs[VARIANTS[0]])),
                           increased_existing_edges=sum(graphs[VARIANTS[1]][p] > w
                                                        for p,w in graphs[VARIANTS[0]].items())),
-                      graph_truth_used=False, truth_use='evaluation and predefined overlap cohort only',
+                      routing=routing_info, graph_truth_used=route_labels is not None,
+                      truth_use=('true format restricts both graphs; file IDs/offsets for evaluation and predefined overlap cohort only'
+                                 if route_labels is not None else 'evaluation and predefined overlap cohort only'),
                       records=records, aggregate=summarize(records),
                       graph_edges_sha256=file_hash(output / 'graph_edges.csv'),
                       memberships_sha256=file_hash(output / 'memberships.csv'),
@@ -428,6 +484,8 @@ def main():
     for name in ('blocks', 'scores', 'payload', 'truth', 'output'):
         r.add_argument('--' + name, required=True)
     r.add_argument('--overlap', help='existing samefile-v7-overlap audit; optional separate cohort')
+    r.add_argument('--routing', choices=('all-pairs', 'oracle-format'), default='all-pairs',
+                   help='oracle-format uses TRUE formats for a diagnostic, NOT actual FFC routing')
     r.add_argument('--k', type=int, default=15)
     r.add_argument('--threshold', type=float, default=0.5)
     r.add_argument('--zip-alpha', type=float, default=0.5)

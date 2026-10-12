@@ -818,3 +818,71 @@ ZIP_PILOT_DIR="/home/subin/SSSLAB_carving/structural-validator/pair-pilot-output
 수정안 탐색에 사용했다면 최종 평가는 겹치지 않는 새 원본 파일 표본에서 수행한다.
 새 표본에서도 Same-File 단독 / ZIP 보완, 적용 범위, 오병합·과분리, 모델 파일 중복을
 함께 평가하고 전체 성능과 ZIP 적용 부분의 성능을 구분해 보고한다.
+
+### 후속 비교: 정답 포맷 라우팅을 가정한 원인 진단
+
+첫 grouping 진단에서 baseline 연결 19,011개 중 같은 파일 연결은 1,506개(7.92%)였고,
+다른 포맷 사이 연결은 12,291개(64.65%)였다. ZIP으로 새로 추가한 192개 연결 중
+189개는 같은 파일, 3개는 다른 파일이었다. 기존 그래프에서 같은 포맷 연결만 사후에
+골라도 같은 파일 비율은 1,506/6,720 = 22.41%였다. 이는 새 grouping의 정확도가 아니다.
+포맷 혼합 외에도 같은 포맷 안의 점수·연결 선택 문제가 남을 가능성을 보여준다.
+
+다음 가설을 별도의 **oracle 진단**으로 검사한다.
+“파일 포맷이 정확히 알려졌다고 가정하여 다른 포맷 사이의 연결을 막으면,
+Same-File grouping 및 그 위에 더하는 ZIP 근거의 효과가 달라지는가?”
+
+`--routing oracle-format`에서만 `truth.csv`의 `format`을 연결 후보 제한에 사용한다.
+원본 파일 ID와 위치는 연결 생성에 사용하지 않는다. 이 실험은 정답을 일부 사용하므로
+실제 FFC → Same-File → grouping 파이프라인의 성능, 독립 평가 또는 성능 상한의 증명이 아니다.
+기본값 `--routing all-pairs`의 기존 동작은 바뀌지 않는다.
+
+- 각 노드에서 **같은 포맷 후보로 먼저 제한한 뒤**, 기존 점수 0.5 이상·상위 15개를
+  다시 선택한다. 기존 그래프에서 포맷 간 엣지만 삭제하는 방식과 다르다.
+- ZIP PASS도 같은 제한을 적용한다. 다른 포맷 PASS가 몇 개 제외됐는지 별도로 기록한다.
+  같은 포맷의 다른 원본 파일 PASS는 그대로 남는다. 실제 같은 파일 여부로 거르지 않는다.
+- 점수·모델·블록·ZIP 검사·alpha=0.5·resolution=1.0·seed 0~4는 그대로 쓴다.
+  하나의 그래프에서 Leiden을 실행하므로 포맷별 독립 실행과는 다르며,
+  modularity의 전체 가중치 정규화도 공유한다. 정답 파일 수를 목표 그룹 수로 넣지 않는다.
+- 같은 조건 안에서 **Same-File 단독 vs ZIP 보완**을 비교한다. 포맷 라우팅을 추가한
+  효과와 ZIP 효과를 혼동하지 않는다. 라우팅 전후 ZIP 적용 블록 집합이 달라질 수 있으므로
+  서로 다른 적용 부분집합의 점수만으로 개선을 비교하지 않는다.
+- 모델 메타 미관측 cohort는 기존과 같이 전체 그래프의 유도 그래프에서 다시 clustering하며,
+  제외된 노드 대신 새 이웃을 채우지 않는다. 이 cohort도 oracle 진단이라는 점은 같다.
+
+```sh
+cd /home/subin/SSSLAB_carving
+git pull --ff-only
+cd structural-validator
+ZIP_PILOT_DIR="/home/subin/SSSLAB_carving/structural-validator/pair-pilot-output/20261012-094851-577470"
+
+/home/subin/venvs/zip-grouping/bin/python compare_samefile_grouping.py run \
+  --blocks "$ZIP_PILOT_DIR/blocks.npy" \
+  --scores "$ZIP_PILOT_DIR/samefile-v7-seed42" \
+  --payload "$ZIP_PILOT_DIR/payload-v1" \
+  --truth "$ZIP_PILOT_DIR/truth.csv" \
+  --overlap "$ZIP_PILOT_DIR/samefile-v7-overlap" \
+  --routing oracle-format \
+  --k 15 --threshold 0.5 --zip-alpha 0.5 --resolution 1.0 \
+  --seeds 0 1 2 3 4 \
+  --output "$ZIP_PILOT_DIR/grouping-oracle-format-v1"
+```
+
+기존 점수 파일을 사용하므로 GPU/모델 추론/재학습이 필요 없다. 결과 폴더는 기존
+`grouping-v1`과 분리한다. 콘솔과 `report.md`에 oracle 조건을 표시하며,
+`comparison.json`의 `graph_truth_used=true`, `routing`, 별도 experiment 이름에
+정답 포맷 사용과 제외된 PASS 수를 기록한다. `run_state.json`이 `complete`인지 확인한다.
+
+필요하면 같은 진단기로 새 그래프의 정밀도와 그룹 혼합 정도도 확인할 수 있다.
+
+```sh
+/home/subin/venvs/zip-grouping/bin/python audit_grouping.py \
+  --blocks "$ZIP_PILOT_DIR/blocks.npy" \
+  --truth "$ZIP_PILOT_DIR/truth.csv" \
+  --run "$ZIP_PILOT_DIR/grouping-oracle-format-v1" \
+  --output "$ZIP_PILOT_DIR/grouping-oracle-format-audit-v1"
+```
+
+oracle에서도 같은 포맷의 잘못된 연결과 오병합이 많으면 라우팅만으로 해결되지 않은 것이다.
+oracle에서 개선되면 이후 **이 1,600블록에 대한 실제 FFC 예측**으로 같은 비교를 수행해야 한다.
+이전 696,320행 test 예측 CSV는 입력 블록 집합이 다르므로 그대로 사용할 수 없다.
+현재 파일럿으로 설정을 고른 뒤에는 겹치지 않는 원본 파일에서 설정을 고정하여 평가한다.

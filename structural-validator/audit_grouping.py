@@ -1,7 +1,8 @@
 """Post-hoc score, graph and partition diagnostics. Never changes a prediction.
 
-Truth is intentionally used to diagnose saved results, not to select edges or
-parameters. No model inference or Leiden optimization is performed.
+Truth diagnoses saved results. For an explicitly marked oracle-format run its
+routing is replayed solely for integrity checking; no new configuration is chosen.
+No model inference or Leiden optimization is performed.
 """
 import argparse
 from collections import Counter, defaultdict
@@ -14,7 +15,7 @@ import numpy as np
 
 from audit_zip_payload import read_truth
 from compare_samefile_grouping import (VARIANTS, aggregate, build_graphs, dump,
-                                      load_scores, load_zip_pairs, pair_counts, unseen_ids)
+                                      load_scores, load_zip_pairs, pair_counts, prepare_routing, unseen_ids)
 from zip_pair_candidates import fingerprint, load_blocks
 from zip_pair_payload import file_hash
 
@@ -205,6 +206,10 @@ def render(report):
         return '—' if x is None else f'{x:.4f}'
     lines = ['# Grouping 원인 진단', '',
              '저장된 점수·그래프·그룹의 사후 정답 분석임. 추론·clustering·설정 변경 없음.', '']
+    oracle = report.get('routing', {}).get('ground_truth_format_used', False)
+    if oracle:
+        lines += ['**원 실행은 정답 포맷으로 연결 후보를 제한한 oracle 진단임. 실제 FFC 성능이 아님.**',
+                  '원래 점수 평가는 라우팅 전 점수임. 아래 그래프·그룹 평가는 라우팅 후 저장된 결과임.', '']
     for name,c in report['cohorts'].items():
         lines += [f'## {name} — {c["blocks"]}블록 / {c["files"]}파일', '',
                   '| 원래 점수 평가 | 쌍 수 | 같은 파일 비율 | AP | ROC-AUC | 기존 임계값 정밀도 |',
@@ -233,7 +238,8 @@ def render(report):
         lines.append('')
     lines += ['- AP는 Average Precision이며, 고정 임계값의 정밀도와 다른 순위 지표임. 같은 파일 비율과 함께 해석함.',
               '- 그래프 연결 정밀도는 직접 선택된 엣지 기준임. 최종 over-merge는 같은 그룹의 모든 쌍 기준이므로 서로 다름.',
-              '- same_format_pairs는 정답 포맷을 이용한 사후 진단 범위임. 포맷으로 쌍을 걸러낸 새 grouping 결과가 아님.',
+              ('- same_format_pairs는 원래 점수 중 라우팅 허용 범위의 평가임. 그래프는 동일 포맷 내부에서 이웃을 다시 선택한 저장 결과임.'
+               if oracle else '- same_format_pairs는 정답 포맷을 이용한 사후 진단 범위임. 포맷으로 쌍을 걸러낸 새 grouping 결과가 아님.'),
               '- pairs_touching_zip_blocks는 ZIP 적용 블록과 비적용 블록 사이의 관계도 포함함.',
               '- 직접 ZIP 쌍 / ZIP에 닿는 쌍 / 전체 쌍은 중첩되므로 더하지 않음.',
               '- 숫자 그룹 ID의 변경은 세지 않음. 두 블록이 함께 묶였는지가 바뀐 경우만 셈.',
@@ -249,7 +255,8 @@ def audit(blocks, truth_path, run, output):
     comparison = json.loads((run/'comparison.json').read_text())
     state = json.loads((run/'run_state.json').read_text())
     if (state.get('status') != 'complete' or state.get('partitions') != len(comparison['records'])
-            or comparison.get('experiment') != 'samefile-zip-leiden-pilot-v1'):
+            or comparison.get('experiment') not in ('samefile-zip-leiden-pilot-v1',
+                                                    'samefile-zip-leiden-oracle-format-pilot-v1')):
         raise ValueError('requires completed supported grouping run')
     x = load_blocks(blocks)
     if fingerprint(x) != comparison['blocks_sha256'] or file_hash(truth_path) != comparison['truth_sha256']:
@@ -266,9 +273,20 @@ def audit(blocks, truth_path, run, output):
            ('payload_summary_sha256','baseline_queries_sha256','evidence_sha256')):
         raise ValueError('ZIP input changed since grouping')
     p = comparison['parameters']
-    graphs = build_graphs(scores, passed, p['k'], p['threshold'], p['zip_alpha'])
-    check_saved_graph(run, scores, passed, graphs)
     truth, _ = read_truth(truth_path, len(x))
+    mode = p.get('routing', 'all-pairs')
+    oracle = mode == 'oracle-format'
+    if (comparison.get('graph_truth_used') is not oracle or
+            (comparison['experiment'] == 'samefile-zip-leiden-oracle-format-pilot-v1') != oracle):
+        raise ValueError('routing/truth provenance mismatch')
+    route_labels, passed, routing_info = prepare_routing(
+        mode, [r['format'] for r in truth] if oracle else None, passed, len(x))
+    if 'routing' in comparison and comparison['routing'] != routing_info:
+        raise ValueError('routing metadata does not reproduce')
+    if oracle and 'routing' not in comparison:
+        raise ValueError('oracle run requires routing metadata')
+    graphs = build_graphs(scores, passed, p['k'], p['threshold'], p['zip_alpha'], route_labels)
+    check_saved_graph(run, scores, passed, graphs)
     # File-format disagreement would make relation buckets ambiguous.
     file_formats = defaultdict(set)
     for r in truth:
@@ -287,7 +305,7 @@ def audit(blocks, truth_path, run, output):
     report = dict(audit='grouping-diagnostics-v1', comparison_path=str(run/'comparison.json'),
                   comparison_sha256=file_hash(run/'comparison.json'), blocks_sha256=fingerprint(x),
                   truth_sha256=file_hash(truth_path), truth_used=True, inference_performed=False,
-                  input_results_modified=False, cohorts={})
+                  input_results_modified=False, routing=routing_info, cohorts={})
     clusters, files, zip_rows = [], [], []
     for name, ids in cohorts.items():
         print(f'점수·연결·그룹 진단: {name}', flush=True)

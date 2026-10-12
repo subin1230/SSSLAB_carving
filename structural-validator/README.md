@@ -319,3 +319,12 @@ python3 count_adjacent_blocks.py --meta \
 이웃 블록이 있는 블록 비율, 첫 블록(헤더)을 가진 파일 수를 센다.
 연속 쌍이 거의 없으면 블록 쌍 실험은 원본 파일에서 쌍 데이터셋을 새로 만들어야 한다.
 `files_in_multiple_splits`가 0이 아니면 split이 파일 단위로 분리되지 않았으므로 별도 확인한다.
+### ZIP 계열 연속 구간 파일럿
+
+`extract_zip_pilot.py --root /data-18t/research/tesserae-dataset --cache /home/yurim/tesserae_cache`
+은 val 16KB 그룹에서 JAR/APK/DOCX/PPTX/XLSX 각 최대 10개 파일의 첫 적격 그룹을
+선택한다. 모든 선택 그룹의 파일 코드·타입·표현 플래그 일치 및 블록 인덱스 연속성을
+검사한다. blocks.npy는 순서를 섞은 (N,512) 바이트이며 행 번호가 sample_id이다.
+truth.csv는 원본 ID·위치·라벨을 저장하는 평가 전용 파일로 모델이나 grouping에
+제공하면 안 된다. 편의 표본이며 전체 파일·대표 표본·독립 최종 평가가 아니다.
+16KB 밖 ZIP 참조 대상은 누락될 수 있으므로 연결 대상 포함률을 별도로 평가한다.

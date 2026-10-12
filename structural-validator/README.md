@@ -328,3 +328,61 @@ python3 count_adjacent_blocks.py --meta \
 truth.csv는 원본 ID·위치·라벨을 저장하는 평가 전용 파일로 모델이나 grouping에
 제공하면 안 된다. 편의 표본이며 전체 파일·대표 표본·독립 최종 평가가 아니다.
 16KB 밖 ZIP 참조 대상은 누락될 수 있으므로 연결 대상 포함률을 별도로 평가한다.
+
+### ZIP 연결 후보 생성과 정답 분리 평가
+
+`audit_zip_pilot.py --pilot /path/to/pilot`은 정답 파일 ID·위치를 이용해 대상 위치에
+ZIP 시그니처가 있는지 확인하는 oracle 진단이다. `matching_cross_block_relations`는
+블록을 가로지르는 참조 사건 수이며, 고유 블록 쌍 수·예측 정확도·grouping 입력이 아니다.
+
+`zip_pair_candidates.py`는 다음 단계로, 순서를 섞은 `blocks.npy`만 읽어 연결 후보를
+먼저 저장하고, 별도 평가 명령에서만 `truth.csv`를 읽는다.
+
+```sh
+python3 zip_pair_candidates.py generate \
+  --blocks /path/to/pilot/blocks.npy \
+  --output /path/to/pilot/pair-candidates-v1
+python3 zip_pair_candidates.py evaluate \
+  --blocks /path/to/pilot/blocks.npy \
+  --truth /path/to/pilot/truth.csv \
+  --candidates /path/to/pilot/pair-candidates-v1
+```
+
+- `zip_next`: 로컬 헤더 길이·압축 크기로 다음 헤더가 나타날 **블록 내부 위치**를
+  계산하고, 그 위치에 로컬/중앙 헤더 후보가 있는 모든 블록을 남긴다. 상대 거리도
+  저장한다. 입력 행 순서를 원본 순서로 취급하지 않는다. 위치만 같아도 여러 파일의
+  후보가 나올 수 있으므로 약한 단서이다.
+- `cd_local`: 중앙 헤더와 로컬 헤더의 파일명 바이트·플래그·압축 방식·CRC·크기와
+  선언 오프셋의 블록 내부 위치가 일치하는 후보를 찾는다. CRC는 두 필드의 비교이며
+  압축 데이터 전체의 무결성 검사가 아니다. 공통 리소스를 담은 서로 다른 파일에도
+  같은 값이 있으므로 이 관계도 같은 파일 확정 근거가 아니다.
+- `eocd`: 중앙 디렉터리의 선언 시작·크기와 EOCD 위치의 정렬 관계를 확인하고,
+  시작 위치에 중앙 헤더 후보가 있는 블록을 찾는다. 디렉터리 전체를 검증하지 않는다.
+
+입력은 **원본 파일의 512바이트 경계에 맞춰 추출한 블록**이어야 한다. 중앙/EOCD
+절대 오프셋은 아카이브 시작이 원본 파일의 0번 위치라고 가정한다. 내장 ZIP·SFX,
+ZIP64·멀티디스크·암호화·data descriptor 등은 현재 지원 범위 밖이며, 지원하지 않는
+조건은 다른 파일이라는 판정으로 바꾸지 않는다. 고정 헤더가 잘리면 제외하고,
+`cd_local`은 파일명 전체까지 한 블록 안에 있어야 한다. 여러 블록을 먼저 정답 순서로
+합치지 않는다. 현재 압축 방식은 stored/deflate만 후보로 사용한다.
+필드 기준은 [PKWARE APPNOTE](https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT)
+4.3.7·4.3.12·4.3.16을 참조한다.
+
+`queries.jsonl`에는 후보가 없거나 여럿인 경우도 그대로 저장한다.
+`candidate_summary.json`은 후보 생성 집계와 입력 바이트 SHA-256을 기록한다.
+평가 시 바이트가 달라지면 중단한다. `evaluation.json`의 주요 지표는 다음과 같다.
+
+| 지표 | 의미 |
+|---|---|
+| `exact_target_precision` | 모든 후보 관계 중 실제 참조 대상 블록에 연결한 비율 |
+| `same_file_precision` | 모든 후보 관계 중 같은 원본 파일에 연결한 비율 |
+| `singleton_exact_precision` | 후보가 하나뿐인 질의에서 실제 대상을 맞힌 비율 |
+| `available_target_query_recall` | 지원하는 출발 질의 중 정답 대상 시그니처가 표본 안에 있는 경우, 그 대상을 후보에 포함한 비율 |
+| `unique_unordered_pairs` | 같은 블록 쌍에서 발생한 여러 참조를 합친 쌍 수 |
+| `same_file_unique_pairs` | 그중 같은 원본 파일의 쌍 수 |
+
+가용 대상 recall은 모든 ZIP 참조의 recall이 아니다. 이 생성기는 oracle 진단보다
+대상 헤더·파일명 조건이 엄격하므로 oracle 건수와 직접 같아질 필요도 없다.
+출력 디렉터리와 평가 파일은 덮어쓰지 않는다. 아직 가중치를 정하거나 Leiden에
+관계를 추가하지 않으며, 이 결과로 후보 모호성과 오연결부터 확인한다. 50개 파일의
+편의 표본 결과를 일반화하지 말고 규칙을 고정한 뒤 별도 파일에서 평가해야 한다.

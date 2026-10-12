@@ -656,5 +656,103 @@ TensorFlow 할당 메모리 상한은 기본 2,048MiB이며 CUDA 컨텍스트 �
 - `run_state.json`: `complete`일 때만 완성된 점수 파일로 사용한다. 실패한 실행은
   `failed`로 남으며 부분 출력이나 기존 출력은 덮어쓰지 않는다.
 
-아직 Leiden 비교를 실행하지 않는다. 같은 점수·노드 집합으로 baseline과 ZIP 보완
-조건을 비교할 준비 단계이며, ZIP FAIL은 같은 파일이 아니라는 음성 근거로 사용하지 않는다.
+완성된 점수 파일은 아래 Leiden 비교의 공통 입력이다. ZIP FAIL은 같은 파일이
+아니라는 음성 근거로 사용하지 않는다.
+
+### Same-File 단독 vs ZIP 보완: Leiden 파일럿 비교
+
+`compare_samefile_grouping.py`는 기존 점수와 payload 결과를 읽어 두 조건을 비교한다.
+모델 재학습·GPU 추론은 하지 않는다. 현재 파일럿의 개선 여부는 서버에서 이 명령을
+실행한 후 확인해야 하며, 코드 추가만으로 개선을 확인했다고 주장하지 않는다.
+
+**결과 확인 전에 고정한 탐색 설정**
+
+- baseline: 각 블록에서 점수 0.5 이상인 이웃 중 상위 15개를 선택한다. 어느 한쪽이
+  선택한 쌍을 포함하는 무방향 union kNN 그래프를 만들고 Same-File 점수를 가중치로 쓴다.
+  동일 점수의 순서는 shuffled `sample_id`로 고정한다. 이웃이 없는 블록도 삭제하지 않는다.
+- ZIP 보완: baseline을 그대로 유지하고, payload `PASS`인 고유 쌍마다
+  `새 가중치 = s + 0.5 × (1-s)`를 적용한다. baseline에 없던 PASS 쌍도 추가한다.
+  예: s=0.2 → 0.6, s=0.8 → 0.9. 이는 확률 보정 공식이 아닌 실험용 soft 가중치다.
+  방향·여러 구조에서 같은 쌍이 반복돼도 한 번만 보강한다. FAIL/UNKNOWN은 점수를 깎지 않는다.
+  다른 파일 PASS로 알려진 사례도 정답으로 걸러내지 않는다. 강제 병합도 하지 않는다.
+- `--zip-alpha 0`은 그래프 모양까지 baseline과 같게 하는 무효과 대조 조건이다.
+  기본 0.5는 검증된 최적값이 아니며, 이 파일럿 결과를 보고 유리한 값으로 바꾸지 않는다.
+- Leiden은 `RBConfigurationVertexPartition`, resolution=1.0, 수렴할 때까지 반복한다.
+  seed 0·1·2·3·4 각각에서 두 조건을 실행하고 모든 결과와 짝지은 차이를 보고한다.
+  가장 좋은 seed만 선택하지 않는다. 이 seed는 고정된 Same-File 모델의 학습 seed42와 별개다.
+- 이는 이번 파일럿의 baseline 정의다. 나린님 기존 grouping 설정의 재현 실험이 아니다.
+  실제 원본 파일 수 50이나 정답 포맷을 clustering의 제약으로 넣지 않는다.
+
+API와 지표 정의는 [Leiden 공식 문서](https://leidenalg.readthedocs.io/en/stable/reference.html),
+[ARI](https://scikit-learn.org/1.3/modules/generated/sklearn.metrics.adjusted_rand_score.html),
+[NMI](https://scikit-learn.org/1.3/modules/generated/sklearn.metrics.normalized_mutual_info_score.html)를 따른다.
+
+**서버 실행 — 개인 CPU 가상환경을 한 번 준비**
+
+```sh
+cd /home/subin/SSSLAB_carving
+git pull --ff-only
+cd structural-validator
+python3 -m venv /home/subin/venvs/zip-grouping
+/home/subin/venvs/zip-grouping/bin/python -m pip install --only-binary=:all: -r requirements-grouping.txt
+/home/subin/venvs/zip-grouping/bin/python -m unittest discover -s . -p 'test_compare_samefile_grouping.py' -v
+```
+
+Python 3.8의 서버와 3.12의 로컬 검사 환경에 맞춰 버전을 고정했다. 공유된 나린님
+환경이나 기존 TensorFlow 환경에 설치하지 않는다. 환경이 이미 준비됐다면 아래 실행만 하면 된다.
+
+```sh
+ZIP_PILOT_DIR="/home/subin/SSSLAB_carving/structural-validator/pair-pilot-output/20261012-094851-577470"
+
+/home/subin/venvs/zip-grouping/bin/python compare_samefile_grouping.py run \
+  --blocks "$ZIP_PILOT_DIR/blocks.npy" \
+  --scores "$ZIP_PILOT_DIR/samefile-v7-seed42" \
+  --payload "$ZIP_PILOT_DIR/payload-v1" \
+  --truth "$ZIP_PILOT_DIR/truth.csv" \
+  --overlap "$ZIP_PILOT_DIR/samefile-v7-overlap" \
+  --k 15 --threshold 0.5 --zip-alpha 0.5 --resolution 1.0 \
+  --seeds 0 1 2 3 4 \
+  --output "$ZIP_PILOT_DIR/grouping-v1"
+
+cat "$ZIP_PILOT_DIR/grouping-v1/run_state.json"
+cat "$ZIP_PILOT_DIR/grouping-v1/report.md"
+```
+
+**입력 무결성과 정답 분리**
+
+완료된 점수의 블록·파일 해시, 쌍 ID·중복·누락, logit/sigmoid 대응을 검사한다.
+ZIP baseline query 해시도 검사하며 payload 판정을 실제 두 블록 바이트로 재검사한다.
+사후 truth audit의 `exact_target`이나 `same_file` 판정은 읽지 않는다.
+전체 그래프의 두 조건·모든 seed clustering을 마친 뒤 `truth.csv`를 열어 평가한다.
+
+`--overlap`을 주면 기존 UUID 중복 감사에서 모델 train/val/test 어디에도 관측되지 않은
+파일만 선택하는 별도 평가도 한다. 현재 감사 결과로는 40개 파일, 1,280블록이다.
+이 선택에만 원본 ID를 쓰며 선택된 ID 사이의 기존 그래프를 유도해 **Leiden을 다시 실행**한다.
+제외된 파일을 거쳐 이어진 전체 partition을 부분집합에 그대로 가져오지 않는다.
+kNN 이웃을 다시 채우지 않으므로 제외된 노드의 엣지는 사라진다. 그래프 추론 함수는
+파일 ID·원본 위치·정답 포맷을 입력받지 않는다. 미관측은 FiFTy 사전학습과의 독립성이나
+내용 중복 제거까지 보장하지 않는다. 전체 50개 파일 결과는 모델 train/val 중복을 포함한 탐색 결과다.
+
+**평가와 출력**
+
+- `comparison.json`: 모든 seed의 ARI, arithmetic NMI, 혼합 그룹 수, 여러 그룹으로
+  분리된 파일 수, 쌍 단위 TP/FP/FN/TN, 평균·표준편차·최솟값·최댓값·짝지은 차이.
+  seed 간 표준편차는 알고리즘 변동이며 독립 표본의 신뢰구간이 아니다.
+- over-merge 비율 = 다른 원본 파일인데 같은 그룹인 쌍(FP) / 같은 그룹인 모든 쌍(TP+FP).
+  over-split 비율 = 같은 파일인데 다른 그룹인 쌍(FN) / 실제 같은 파일의 모든 쌍(TP+FN).
+  분모가 0이면 `null`이다. 이 비율들과 함께 FP/FN 실제 건수도 저장한다.
+- `zip_supported_blocks`: 해당 평가 그래프에 남은 PASS 쌍의 양 끝 블록으로 고정한
+  부분집합. 두 조건에서 같은 블록을 평가한다. 부분집합만의 ARI/NMI 외에
+  `pairs_touching_zip_blocks`도 보고한다. 후자는 한쪽 이상이 적용 블록인 모든 쌍을
+  포함해, 부분집합 밖과의 잘못된 병합도 포착한다.
+- `graph_edges.csv`: 공통 sample_id, 원래 점수, 두 조건 가중치, ZIP PASS 여부.
+  `graph_changes`에는 실제 추가된 엣지와 기존 엣지 가중치가 증가한 수를 기록한다.
+- `memberships.csv`: cohort·seed·variant별 모든 블록의 그룹 ID. 그룹 번호 자체는
+  조건 사이에 같은 파일을 뜻하지 않으며 ARI/NMI 같은 분할 지표로 비교한다.
+- `parameters.json`: 고정 설정. `report.md`: 회의용 비교 표.
+  `run_state.json`이 `complete`인 실행만 사용한다. 오류는 `failed`로 남고 출력은 덮어쓰지 않는다.
+
+50개 파일에서 한 구간씩 뽑은 편의 파일럿이고, 점수는 서로 다른 포맷 사이의 쌍에도
+사용됐다. 실제 FFC 라우팅을 포함한 전체 파이프라인이나 나린님 동일 포맷 평가의 성능으로
+일반화하지 않는다. 개선·악화·무효과 어느 결과든 그대로 보고하고, 후속 독립 파일에서
+설정 고정 평가가 필요하다.

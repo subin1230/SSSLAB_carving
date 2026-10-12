@@ -495,3 +495,82 @@ python3 audit_zip_payload.py \
 바이트가 같다는 결과는 비교한 구간의 내용 일치를 뜻하며, 원본 아카이브 전체의 동일성이나
 어떤 파일이 다른 파일을 복사했다는 이력을 증명하지 않는다. 정답 대상 재구성은 사후 진단
 전용이다. 이 보고서는 점수·후보·grouping 입력을 변경하지 않으며 기존 출력도 덮어쓰지 않는다.
+
+### Same-File V7 연동: 학습 파일 중복 확인과 고정 모델 추론
+
+제공된 나린님 V7 코드에서 확인한 인터페이스는 다음과 같다.
+
+- FiFTy `/home/narin/fifty/fifty/utilities/models/512_1.h5`에 원래 0~255 바이트를 입력한다.
+  `leaky_re_lu_2`의 256차원 출력을 사용하며 입력을 255로 나누지 않는다.
+- 두 임베딩 `h1`, `h2`를 `concat(abs(h1-h2), h1*h2)` 순서로 결합한
+  float32 512차원 배열이 Same-File MLP 입력이다.
+- V7 main MLP의 출력층은 활성화 없는 Dense(1)이며 `from_logits=True`로 학습했다.
+  따라서 출력 **logit에 sigmoid를 한 번 적용**해야 한다. `label=1`이 같은 파일이다.
+- 이번 고정 모델 후보는 `main_results/v7_mlp_seed42.keras`이다. 파일럿 점수가 좋은
+  seed를 골라 바꾸지 않는다. 제공된 V7 메타데이터에는 JAR/APK/DOCX/PPTX/XLSX 모두
+  train 3,840 / val 1,280 / test 1,280블록씩 존재한다. 포맷 포함은 성능 보장이 아니다.
+
+**1. 원본 파일 중복 검사 (평가 전용)**
+
+```sh
+python3 audit_samefile_overlap.py \
+  --pilot /path/to/pilot \
+  --model-blocks /home/narin/samefile_v7/v7_blocks_final.csv \
+  --cache /home/yurim/tesserae_cache \
+  --data-root /data-18t/research/tesserae-dataset/data \
+  --output /path/to/pilot/samefile-v7-overlap
+```
+
+파일럿 `truth.csv`와 V7의 최종 블록 메타데이터를 별도로 읽는다. 서로 다른 형태의
+파일 ID 문자열을 직접 비교하지 않고, 양쪽 global block ID를 같은 `file_code.npy`와
+`uuid_table.npy`에 대응시킨다. 인덱스·포맷 ID도 교차 확인한다. 다른 블록을 선택했어도
+같은 UUID이면 파일 단위 중복에 포함한다. `overlap_summary.json`과
+`pilot_source_overlap.csv`에 train/val/test별 중복과 동일 블록 중복을 저장한다.
+V7 source ID 하나가 여러 UUID에 대응하거나 UUID가 split을 가로지르는지도 집계한다.
+
+이 검사는 관측된 최종 모델 블록의 UUID에 기반한다. 파일 내용 중복 제거, source 범위
+전체의 동일성, FiFTy 사전학습 데이터와의 독립성까지 증명하지 않는다. train 중복은
+이미 본 파일에 대한 평가이고, val 중복은 모델 선택에 사용된 파일일 수 있다.
+파일럿은 그대로 유지하며 정답을 이용해 블록이나 점수 입력을 바꾸지 않는다.
+
+**2. 추론 환경과 점수 생성 (정답·ZIP 결과 입력 없음)**
+
+```sh
+python3 score_samefile_pilot.py environment
+python3 score_samefile_pilot.py score \
+  --blocks /path/to/pilot/blocks.npy \
+  --encoder-model /home/narin/fifty/fifty/utilities/models/512_1.h5 \
+  --pair-model /home/narin/samefile_v7/main_results/v7_mlp_seed42.keras \
+  --reference-blocks /home/narin/samefile_v7/v7_raw_blocks_final.npy \
+  --reference-embeddings /home/narin/samefile_v7/v7_embeddings.npy \
+  --output /path/to/pilot/samefile-v7-seed42
+```
+
+TensorFlow가 설치된 호환 Python에서 실행해야 한다. `environment`는 현재 Python의
+TensorFlow 설치 여부와 기존 venv 경로만 확인하며 설치나 다른 환경 실행을 하지 않는다.
+나린님 학습 스크립트를 import하거나 재학습하지 않고 저장된 두 모델만 `compile=False`로
+읽는다. CPU·연산 스레드 2개를 기본값으로 사용한다. 실제 모델 차원을 확인하고 출력층이
+linear가 아니면 중단하여 sigmoid 중복 적용을 막는다.
+
+먼저 기존 V7 raw/embedding 배열의 균등 간격 최대 16행을 다시 계산한다.
+저장된 임베딩과 허용오차(`atol=rtol=1e-4`) 안에서 일치해야 우리 블록으로 넘어간다.
+이는 전처리·인코더 호환성 표본 검사이며 전체 임베딩의 동일성 검증은 아니다.
+로컬 테스트에는 TensorFlow와 실제 모델 파일이 없어 특징 결합·수치 변환·쌍 열거·
+입출력·중복 진단을 검증했다. 실제 모델 로딩과 임베딩 재현 여부는 서버 실행으로 확인한다.
+
+1,600블록의 순서 없는 모든 쌍 **1,279,200개**를 배치로 계산한다. 정답 포맷으로
+쌍을 걸러내지 않으므로 서로 다른 포맷의 쌍도 포함한다. V7은 같은 포맷 안의 다른 파일을
+음성으로 학습했으므로 포맷 간 점수는 학습 조건 밖의 탐색 결과이다. 실제 동일 포맷
+후보로 범위를 한정할 때는 FFC 예측 등 별도 입력과 평가 조건을 명시해야 한다.
+0으로 채워진 블록도 삭제하지 않고 개수를 기록한다.
+
+- `embeddings.npy`: 입력과 같은 행 순서의 `(N,256)` 임베딩.
+- `samefile_scores.csv.gz`: `sample_id_1,sample_id_2,same_file_logit,same_file_score`.
+  ID는 입력 블록 행 번호이며 항상 `sample_id_1 < sample_id_2`이다.
+- `score_manifest.json`: 모델·블록·출력 해시, 환경, 특징 구성, 임베딩 재현 검사,
+  쌍 수와 적용 조건. sigmoid 점수를 확률 보정된 값으로 주장하지 않는다.
+- `run_state.json`: `complete`일 때만 완성된 점수 파일로 사용한다. 실패한 실행은
+  `failed`로 남으며 부분 출력이나 기존 출력은 덮어쓰지 않는다.
+
+아직 Leiden 비교를 실행하지 않는다. 같은 점수·노드 집합으로 baseline과 ZIP 보완
+조건을 비교할 준비 단계이며, ZIP FAIL은 같은 파일이 아니라는 음성 근거로 사용하지 않는다.
